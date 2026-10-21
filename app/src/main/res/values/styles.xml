@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style name="Widget.SwiftPic.EditorChip" parent="">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginEnd">8dp</item>
+        <item name="android:background">@drawable/bg_editor_chip</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+        <item name="android:paddingLeft">14dp</item>
+        <item name="android:paddingRight">14dp</item>
+        <item name="android:paddingTop">7dp</item>
+        <item name="android:paddingBottom">7dp</item>
+        <item name="android:textColor">@color/white</item>
+        <item name="android:textSize">13sp</item>
+    </style>
+
+    <style name="Widget.SwiftPic.EditorAction" parent="">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">match_parent</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:background">?attr/selectableItemBackgroundBorderless</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+        <item name="android:gravity">center</item>
+        <item name="android:textColor">@color/white</item>
+        <item name="android:textSize">14sp</item>
+    </style>
+    <style name="SwiftPic.ActivityAnim" parent="@android:style/Animation.Activity">
+        <item name="android:activityOpenEnterAnimation">@anim/swiftpic_instant</item>
+        <item name="android:activityOpenExitAnimation">@anim/swiftpic_instant</item>
+        <item name="android:activityCloseEnterAnimation">@anim/swiftpic_instant</item>
+        <item name="android:activityCloseExitAnimation">@anim/swiftpic_instant</item>
+        <item name="android:taskOpenEnterAnimation">@anim/swiftpic_instant</item>
+        <item name="android:taskOpenExitAnimation">@anim/swiftpic_instant</item>
+        <item name="android:taskCloseEnterAnimation">@anim/swiftpic_instant</item>
+        <item name="android:taskCloseExitAnimation">@anim/swiftpic_instant</item>
+    </style>
+
+    <style name="SwiftPic.WindowInstant" parent="">
+        <item name="android:windowEnterAnimation">@anim/swiftpic_instant</item>
+        <item name="android:windowExitAnimation">@anim/swiftpic_instant</item>
+    </style>
+
+</resources>

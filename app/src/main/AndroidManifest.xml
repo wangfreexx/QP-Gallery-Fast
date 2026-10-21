@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- targetSdk 32: READ_EXTERNAL_STORAGE is what MediaStore and WallpaperManager use.
+         Declaring the granular READ_MEDIA_* permissions here makes MIUI's wallpaper
+         check fail with "Op READ_MEDIA_IMAGES ignore", so they are intentionally absent. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.SET_WALLPAPER" />
+
+    <application
+        android:name=".SwiftPicApp"
+        android:allowBackup="true"
+        android:hardwareAccelerated="true"
+        android:icon="@drawable/ic_launcher_flat"
+        android:label="@string/app_name"
+        android:largeHeap="true"
+        android:roundIcon="@drawable/ic_launcher_flat"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.SwiftPic">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:alwaysRetainTaskState="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".ui.AlbumActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".ui.SettingsActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".ui.SearchActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".ui.viewer.ViewerActivity"
+            android:exported="false"
+            android:theme="@style/Theme.SwiftPic.Viewer" />
+
+        <activity
+            android:name=".ui.edit.EditActivity"
+            android:exported="false"
+            android:theme="@style/Theme.SwiftPic.Viewer" />
+
+        <activity
+            android:name=".ui.WallpaperCropActivity"
+            android:exported="false"
+            android:theme="@style/Theme.SwiftPic.Viewer" />
+    </application>
+
+</manifest>

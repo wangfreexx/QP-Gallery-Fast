@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#0B0D10</color>
+    <color name="surface">#14171C</color>
+    <color name="surface_high">#1C2027</color>
+    <color name="surface_higher">#252A33</color>
+    <color name="text_primary">#F3F6F8</color>
+    <color name="text_secondary">#98A3AF</color>
+    <color name="text_tertiary">#69737E</color>
+    <color name="accent">#A7F36B</color>
+    <color name="accent_dim">#6CB53B</color>
+    <color name="on_accent">#0B0D10</color>
+    <color name="danger">#FF6B6B</color>
+    <color name="hdr_gold">#FFD166</color>
+    <color name="divider">#252A33</color>
+    <color name="scrim">#B3000000</color>
+    <color name="icon_bg">#0B0D10</color>
+    <color name="placeholder">#191D23</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="black">#FF000000</color>
+
+    <color name="light_bg">#F6F7F9</color>
+    <color name="light_surface">#FFFFFF</color>
+    <color name="light_surface_variant">#E9EDF2</color>
+    <color name="light_text_primary">#171A1E</color>
+    <color name="light_text_secondary">#5E6874</color>
+    <color name="light_outline">#D7DDE4</color>
+    <color name="light_primary">#2E7D3A</color>
+    <color name="light_on_primary">#FFFFFF</color>
+    <color name="light_danger">#B3261E</color>
+
+    <color name="amoled_surface">#050505</color>
+    <color name="amoled_surface_variant">#0C0C0C</color>
+    <color name="amoled_outline">#1A1A1A</color>
+</resources>

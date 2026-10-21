@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="grid_gap">2dp</dimen>
+    <dimen name="album_gap">6dp</dimen>
+    <dimen name="content_padding">10dp</dimen>
+    <dimen name="toolbar_height">56dp</dimen>
+    <dimen name="badge_text">10sp</dimen>
+    <dimen name="viewer_side_padding">8dp</dimen>
+</resources>

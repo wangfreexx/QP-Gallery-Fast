@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/black"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:background="@color/black"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="4dp"
+        android:paddingEnd="8dp">
+
+        <ImageButton
+            android:id="@+id/backButton"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/back"
+            android:padding="12dp"
+            android:src="@drawable/ic_back"
+            app:tint="@color/white" />
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:layout_weight="1"
+            android:fontFamily="sans-serif-medium"
+            android:text="@string/edit"
+            android:textColor="@color/white"
+            android:textSize="17sp" />
+
+        <ImageButton
+            android:id="@+id/settingsButton"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/settings"
+            android:padding="12dp"
+            android:src="@drawable/ic_settings"
+            app:tint="@color/white" />
+
+        <TextView
+            android:id="@+id/saveButton"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:clickable="true"
+            android:focusable="true"
+            android:fontFamily="sans-serif-medium"
+            android:gravity="center"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:text="@string/save_copy"
+            android:textColor="@color/accent"
+            android:textSize="15sp" />
+    </LinearLayout>
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:background="@color/black">
+
+        <ImageView
+            android:id="@+id/editImage"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:contentDescription="@null"
+            android:scaleType="fitCenter" />
+
+        <com.qoder.swiftpic.ui.edit.CropOverlayView
+            android:id="@+id/cropOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <ProgressBar
+            android:id="@+id/editLoading"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:layout_gravity="center"
+            android:indeterminateTint="@color/accent"
+            android:visibility="gone" />
+    </FrameLayout>
+
+    <HorizontalScrollView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#0A0A0A"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="12dp"
+            android:paddingEnd="4dp">
+
+            <TextView
+                android:id="@+id/ratioFree"
+                style="@style/Widget.SwiftPic.EditorChip"
+                android:text="@string/aspect_free" />
+
+            <TextView
+                android:id="@+id/ratioSquare"
+                style="@style/Widget.SwiftPic.EditorChip"
+                android:text="1:1" />
+
+            <TextView
+                android:id="@+id/ratio4x3"
+                style="@style/Widget.SwiftPic.EditorChip"
+                android:text="4:3" />
+
+            <TextView
+                android:id="@+id/ratio3x4"
+                style="@style/Widget.SwiftPic.EditorChip"
+                android:text="3:4" />
+
+            <TextView
+                android:id="@+id/ratio16x9"
+                style="@style/Widget.SwiftPic.EditorChip"
+                android:text="16:9" />
+
+            <TextView
+                android:id="@+id/ratioOriginal"
+                style="@style/Widget.SwiftPic.EditorChip"
+                android:text="@string/aspect_original" />
+        </LinearLayout>
+    </HorizontalScrollView>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="54dp"
+        android:background="#0A0A0A"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/rotateLeftButton"
+            style="@style/Widget.SwiftPic.EditorAction"
+            android:text="@string/rotate_left" />
+
+        <TextView
+            android:id="@+id/rotateRightButton"
+            style="@style/Widget.SwiftPic.EditorAction"
+            android:text="@string/rotate_right" />
+
+        <TextView
+            android:id="@+id/mirrorButton"
+            style="@style/Widget.SwiftPic.EditorAction"
+            android:text="@string/mirror" />
+
+        <TextView
+            android:id="@+id/resetButton"
+            style="@style/Widget.SwiftPic.EditorAction"
+            android:text="@string/reset" />
+    </LinearLayout>
+
+</LinearLayout>

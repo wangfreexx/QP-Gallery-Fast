@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<com.qoder.swiftpic.ui.widget.SquareFrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:padding="1dp">
+
+    <ImageView
+        android:id="@+id/photoImage"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="?attr/colorSurfaceVariant"
+        android:contentDescription="@null"
+        android:scaleType="centerCrop" />
+
+    <TextView
+        android:id="@+id/photoBadge"
+        style="@style/Widget.SwiftPic.Badge"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|start"
+        android:layout_margin="4dp"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/photoHdrBadge"
+        style="@style/Widget.SwiftPic.Badge"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:layout_margin="4dp"
+        android:text="HDR"
+        android:textColor="@color/hdr_gold"
+        android:visibility="gone" />
+
+    <LinearLayout
+        android:id="@+id/photoTags"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_margin="4dp"
+        android:gravity="end"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/photoTag1"
+            style="@style/Widget.SwiftPic.TagChip"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/photoTag2"
+            style="@style/Widget.SwiftPic.TagChip"
+            android:layout_marginTop="3dp"
+            android:visibility="gone" />
+    </LinearLayout>
+
+    <View
+        android:id="@+id/photoScrim"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#59000000"
+        android:visibility="gone" />
+
+    <ImageView
+        android:id="@+id/photoCheck"
+        android:layout_width="22dp"
+        android:layout_height="22dp"
+        android:layout_gravity="top|end"
+        android:layout_margin="5dp"
+        android:contentDescription="@null"
+        android:src="@drawable/ic_circle_outline"
+        android:visibility="gone"
+        app:tint="@color/white" />
+
+</com.qoder.swiftpic.ui.widget.SquareFrameLayout>
