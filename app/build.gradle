@@ -14,7 +14,7 @@ android {
         // to read the system wallpaper (it ignores the granular media permissions).
         targetSdk 32
         versionCode 3
-        versionName "1.8.1"
+        versionName "1.8.2"
     }
 
     buildFeatures {

@@ -267,4 +267,10 @@
     <string name="exclude_album_done">已排除「%1$s」（%2$s）\n可在 设置 → 排除路径 恢复</string>
     <string name="exclude_album_root">根目录相册不能排除</string>
     <string name="album_tags_title">「%1$s」的标签</string>
+    <string name="viewer_exit">退出</string>
+    <string name="last_page_hint">已经是最后一页</string>
+    <string name="chrome_auto_hide">自动隐藏信息栏</string>
+    <string name="chrome_auto_hide_summary">查看大图时，标题和工具栏在无操作后自动收起；点画面中间可再次显示</string>
+    <string name="auto_hide_seconds">%1$d 秒</string>
+    <string name="auto_hide_never">不自动隐藏</string>
 </resources>

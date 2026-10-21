@@ -139,6 +139,15 @@ class AppPrefs(context: Context) {
             sp.edit().putBoolean(KEY_KEEP_SCREEN_ON, value).apply()
         }
 
+    /** Viewer chrome idle timeout in ms; 0 keeps it on screen. */
+    var chromeAutoHideMs: Int
+        get() = sp.getInt(KEY_CHROME_AUTO_HIDE, 3000).let {
+            if (it == 0 || it == 2000 || it == 3000 || it == 5000 || it == 10000) it else 3000
+        }
+        set(value) {
+            sp.edit().putInt(KEY_CHROME_AUTO_HIDE, value).apply()
+        }
+
     var homeLayout: HomeLayout
         get() = HomeLayout.fromOrdinal(sp.getInt(KEY_HOME_LAYOUT, HomeLayout.GRID.ordinal))
         set(value) {
@@ -229,6 +238,7 @@ class AppPrefs(context: Context) {
         const val KEY_ORIENTATION = "orientation_mode"
         const val KEY_TAP_PAGING = "tap_paging"
         const val KEY_KEEP_SCREEN_ON = "keep_screen_on"
+        const val KEY_CHROME_AUTO_HIDE = "chrome_auto_hide_ms"
         const val KEY_HOME_LAYOUT = "home_layout"
         const val KEY_ANIMATION_SCALE = "animation_scale"
         const val KEY_BACKGROUND_MODE = "background_mode"

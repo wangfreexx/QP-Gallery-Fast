@@ -310,7 +310,6 @@ class MainActivity : BaseActivity() {
 
         val items = ArrayList<MainItem>(visibleAlbums.size + 4)
         items.add(MainItem.Banner(visible.firstOrNull(), visible.size))
-        items.add(MainItem.Section(getString(R.string.albums)))
         if (favorites.isNotEmpty()) {
             val favoritesAlbum = Album(
                 GalleryKeys.FAVORITES,

@@ -19,10 +19,10 @@ import android.os.Bundle
 import android.print.PrintManager
 import android.provider.MediaStore
 import android.util.Log
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
-import android.widget.Toast
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -47,6 +47,7 @@ import com.qoder.swiftpic.data.TransitionMode
 import com.qoder.swiftpic.data.sortPhotos
 import com.qoder.swiftpic.databinding.ActivityViewerBinding
 import com.qoder.swiftpic.swiftPic
+import com.qoder.swiftpic.ui.AppHint
 import com.qoder.swiftpic.ui.SettingsActivity
 import com.qoder.swiftpic.ui.UiMotion
 import com.qoder.swiftpic.ui.showMotion
@@ -85,6 +86,9 @@ class ViewerActivity : AppCompatActivity() {
     private var pendingDeletePosition = -1
     private var savedPosition = -1
     private var pageAnimator: ValueAnimator? = null
+    private val autoHideChrome = Runnable {
+        if (!isFinishing && isChromeVisible) hideChrome()
+    }
 
     private val deleteLauncher = registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
@@ -199,6 +203,7 @@ class ViewerActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        cancelChromeAutoHide()
         pageAnimator?.cancel()
         pageAnimator = null
         if (::adapter.isInitialized) {
@@ -217,7 +222,20 @@ class ViewerActivity : AppCompatActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) applySystemBars(isChromeVisible)
+        if (hasFocus) {
+            applySystemBars(isChromeVisible)
+            if (isChromeVisible) scheduleChromeAutoHide()
+        } else {
+            cancelChromeAutoHide()
+        }
+    }
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                if (isChromeVisible) scheduleChromeAutoHide()
+        }
+        return super.dispatchTouchEvent(ev)
     }
 
     private fun loadPhotos() {
@@ -551,6 +569,16 @@ class ViewerActivity : AppCompatActivity() {
         return if (parts.isEmpty()) photo.mime else parts.joinToString(" · ")
     }
 
+    private fun scheduleChromeAutoHide() {
+        cancelChromeAutoHide()
+        val delay = app.prefs.chromeAutoHideMs
+        if (delay > 0 && isChromeVisible) binding.root.postDelayed(autoHideChrome, delay.toLong())
+    }
+
+    private fun cancelChromeAutoHide() {
+        binding.root.removeCallbacks(autoHideChrome)
+    }
+
     private fun showChrome() {
         isChromeVisible = true
         binding.topChrome.visibility = View.VISIBLE
@@ -561,10 +589,12 @@ class ViewerActivity : AppCompatActivity() {
         binding.bottomChrome.animate().alpha(1f).setDuration(animDuration(160)).start()
         applySystemBars(true)
         refreshChrome()
+        scheduleChromeAutoHide()
     }
 
     private fun hideChrome() {
         if (!isChromeVisible) return
+        cancelChromeAutoHide()
         isChromeVisible = false
         applySystemBars(false)
         binding.topChrome.animate().cancel()
@@ -596,7 +626,12 @@ class ViewerActivity : AppCompatActivity() {
         if (!::adapter.isInitialized) return
         val current = binding.pager.currentItem
         val target = (current + delta).coerceIn(0, photos.size - 1)
-        if (target == current) return
+        if (target == current) {
+            if (delta > 0 && photos.isNotEmpty() && current >= photos.size - 1) {
+                AppHint.show(this, getString(R.string.last_page_hint))
+            }
+            return
+        }
         val mode = app.prefs.transitionMode
         if (mode == TransitionMode.NONE) {
             binding.pager.setCurrentItem(target, false)
@@ -734,13 +769,13 @@ class ViewerActivity : AppCompatActivity() {
         try {
             startActivity(Intent.createChooser(send, getString(R.string.share)))
         } catch (_: ActivityNotFoundException) {
-            Toast.makeText(this, R.string.share_failed, Toast.LENGTH_SHORT).show()
+            AppHint.show(this, getString(R.string.share_failed))
         }
     }
 
     private fun requestDeleteCurrent() {
         if (Build.VERSION.SDK_INT < 30) {
-            Toast.makeText(this, R.string.delete_not_supported, Toast.LENGTH_SHORT).show()
+            AppHint.show(this, getString(R.string.delete_not_supported))
             return
         }
         val position = binding.pager.currentItem
@@ -751,7 +786,7 @@ class ViewerActivity : AppCompatActivity() {
             val sender = MediaStore.createDeleteRequest(contentResolver, listOf(photo.uri)).intentSender
             deleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
         } catch (t: Throwable) {
-            Toast.makeText(this, R.string.delete_failed, Toast.LENGTH_SHORT).show()
+            AppHint.show(this, getString(R.string.delete_failed))
         }
     }
 
@@ -777,7 +812,7 @@ class ViewerActivity : AppCompatActivity() {
             adapter.setActivePosition(binding.pager.currentItem)
             refreshChrome()
         }
-        Toast.makeText(this, R.string.deleted, Toast.LENGTH_SHORT).show()
+        AppHint.show(this, getString(R.string.deleted))
     }
 
     private fun showDetails() {
@@ -852,7 +887,7 @@ class ViewerActivity : AppCompatActivity() {
                     .map { it.trim() }
                     .filter { it.isNotEmpty() }
                 app.userData.setTags(listOf(photo), tags)
-                Toast.makeText(this, R.string.tag_saved, Toast.LENGTH_SHORT).show()
+                AppHint.show(this, getString(R.string.tag_saved))
             }
             .setNegativeButton(R.string.cancel, null)
             .showMotion()
@@ -942,9 +977,15 @@ class ViewerActivity : AppCompatActivity() {
                     startActivity(Intent(this, SettingsActivity::class.java))
                     true
                 }
+                R.id.action_exit -> {
+                    finish()
+                    true
+                }
                 else -> false
             }
         }
+        cancelChromeAutoHide()
+        popup.setOnDismissListener { scheduleChromeAutoHide() }
         popup.show()
     }
 
@@ -954,11 +995,7 @@ class ViewerActivity : AppCompatActivity() {
         val hasGainMap = adapter.activeHolder?.uiState?.hasGainMap == true
         applyHdrMode(hasGainMap)
         updateHdrButton()
-        Toast.makeText(
-            this,
-            if (enabled) R.string.hdr_on else R.string.hdr_off,
-            Toast.LENGTH_SHORT
-        ).show()
+        AppHint.show(this, getString(if (enabled) R.string.hdr_on else R.string.hdr_off))
     }
 
     private fun updateHdrButton() {
@@ -995,7 +1032,7 @@ class ViewerActivity : AppCompatActivity() {
         try {
             startActivity(Intent.createChooser(intent, getString(R.string.export_contact)))
         } catch (_: ActivityNotFoundException) {
-            Toast.makeText(this, R.string.share_failed, Toast.LENGTH_SHORT).show()
+            AppHint.show(this, getString(R.string.share_failed))
         }
     }
 
@@ -1006,7 +1043,7 @@ class ViewerActivity : AppCompatActivity() {
             printManager.print(getString(R.string.print_job), ImagePrintAdapter(this, photo), null)
         } catch (t: Throwable) {
             Log.w(TAG, "print failed", t)
-            Toast.makeText(this, R.string.print_failed, Toast.LENGTH_SHORT).show()
+            AppHint.show(this, getString(R.string.print_failed))
         }
     }
 

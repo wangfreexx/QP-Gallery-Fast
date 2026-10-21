@@ -177,6 +177,11 @@ class SettingsActivity : BaseActivity() {
             checked = prefs.keepScreenOn
         ) { prefs.keepScreenOn = it }
         addChoice(
+            title = getString(R.string.chrome_auto_hide),
+            summary = getString(R.string.chrome_auto_hide_summary),
+            value = autoHideLabel(prefs.chromeAutoHideMs)
+        ) { showAutoHideDialog() }
+        addChoice(
             title = getString(R.string.orientation),
             summary = null,
             value = orientationLabel(prefs.orientationMode)
@@ -409,6 +414,29 @@ class SettingsActivity : BaseActivity() {
             .setTitle(R.string.grid_columns)
             .setSingleChoiceItems(labels, values.indexOf(prefs.gridColumns)) { dialog, which ->
                 prefs.gridColumns = values[which]
+                dialog.dismiss()
+                buildRows()
+            }
+            .showMotion()
+    }
+
+    private fun autoHideLabel(ms: Int): String =
+        if (ms <= 0) getString(R.string.auto_hide_never)
+        else getString(R.string.auto_hide_seconds, ms / 1000)
+
+    private fun showAutoHideDialog() {
+        val values = intArrayOf(2000, 3000, 5000, 10000, 0)
+        val labels = arrayOf(
+            getString(R.string.auto_hide_seconds, 2),
+            getString(R.string.auto_hide_seconds, 3),
+            getString(R.string.auto_hide_seconds, 5),
+            getString(R.string.auto_hide_seconds, 10),
+            getString(R.string.auto_hide_never)
+        )
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.chrome_auto_hide)
+            .setSingleChoiceItems(labels, values.indexOf(prefs.chromeAutoHideMs)) { dialog, which ->
+                prefs.chromeAutoHideMs = values[which]
                 dialog.dismiss()
                 buildRows()
             }
