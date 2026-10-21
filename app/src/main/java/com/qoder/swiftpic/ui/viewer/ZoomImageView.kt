@@ -11,6 +11,7 @@ import android.graphics.drawable.AnimatedImageDrawable
 import android.graphics.drawable.Drawable
 import android.os.SystemClock
 import android.util.AttributeSet
+import android.util.Log
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -56,15 +57,23 @@ class ZoomImageView @JvmOverloads constructor(
     private val flingScroller = OverScroller(context)
     private val flingRunnable = object : Runnable {
         override fun run() {
-            if (!flingScroller.computeScrollOffset()) return
+            if (!flingScroller.computeScrollOffset()) {
+                Log.d(TAG, "fling stop ty=${ty.toInt()}")
+                return
+            }
             val newTx = flingScroller.currX.toFloat()
             val newTy = flingScroller.currY.toFloat()
-            if (abs(newTx - tx) < 0.01f && abs(newTy - ty) < 0.01f) return
-            tx = newTx
-            ty = newTy
-            applyTransform()
-            invalidate()
-            if (!flingScroller.isFinished) postOnAnimation(this)
+            if (abs(newTx - tx) >= 0.01f || abs(newTy - ty) >= 0.01f) {
+                tx = newTx
+                ty = newTy
+                applyTransform()
+                invalidate()
+            }
+            if (!flingScroller.isFinished) {
+                postOnAnimation(this)
+            } else {
+                Log.d(TAG, "fling done ty=${ty.toInt()}")
+            }
         }
     }
 
@@ -376,11 +385,14 @@ class ZoomImageView @JvmOverloads constructor(
             minY = currentY
             maxY = currentY
         }
+        // velocityX/Y follow the finger; the content moves with the finger, so the
+        // scroller gets the same sign (negating it flipped the post-release glide).
+        Log.d(TAG, "fling vy=${velocityY.toInt()} ty0=${ty.toInt()} y=$minY..$maxY")
         flingScroller.fling(
             currentX,
             currentY,
-            (-velocityX).roundToInt(),
-            (-velocityY).roundToInt(),
+            velocityX.roundToInt(),
+            velocityY.roundToInt(),
             minX,
             maxX,
             minY,
@@ -506,7 +518,8 @@ class ZoomImageView @JvmOverloads constructor(
     }
 
     private companion object {
+        const val TAG = "SwiftPicZoom"
         const val HORIZONTAL_DOMINANCE = 1.5f
-        const val PAN_GAIN = 2f
+        const val PAN_GAIN = 1.4f
     }
 }

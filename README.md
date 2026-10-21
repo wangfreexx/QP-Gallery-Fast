@@ -14,7 +14,7 @@ Kotlin + View 体系，无广告、无联网、无账号。
 
 **查看器**
 - 左右翻页、双指缩放（最高 64×）、双击缩放、放大后仍可点按翻页
-- 放大后支持横向拖拽翻页，拖动带 2× 增益与惯性
+- 放大后支持横向拖拽翻页，拖动带 1.4× 增益与惯性
 - 超长截图/全景图按原生长边解码，放大后依然清晰
 - 转场可选「滑动」或「淡入淡出」，动画速度全局限速
 - 图片详情（EXIF/尺寸/位置）、分享、删除
@@ -45,7 +45,7 @@ Kotlin + View 体系，无广告、无联网、无账号。
 从 [Releases](https://github.com/wangfreexx/QP-Gallery-Fast/releases) 下载 APK 安装：
 
 ```bash
-adb install SwiftPic-v1.8.0-release.apk
+adb install SwiftPic-v1.8.1-release.apk
 ```
 
 首次启动授予照片读取权限即可。
