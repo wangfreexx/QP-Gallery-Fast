@@ -159,8 +159,14 @@ class ImageLoader(private val context: Context) {
 
     private fun targetSize(width: Int, height: Int, spec: DecodeSpec): Pair<Int, Int> {
         if (width <= 0 || height <= 0) return 1 to 1
-        val dimensionScale = spec.maxDimension.toDouble() / max(width, height).toDouble()
-        val pixelScale = sqrt(spec.maxPixels.toDouble() / (width.toDouble() * height.toDouble()))
+        // A screen-sized cap crushes long screenshots: 584x19683 was decoded 121px
+        // wide and stayed blurry at every zoom level. Long/panoramic images keep
+        // near-native resolution instead, bounded by pixels and the max bitmap size.
+        val longAspect = max(width, height).toLong() >= min(width, height).toLong() * EXTREME_ASPECT
+        val maxDimension = if (longAspect) max(spec.maxDimension, EXTREME_MAX_DIMENSION) else spec.maxDimension
+        val maxPixels = if (longAspect) max(spec.maxPixels, EXTREME_MAX_PIXELS) else spec.maxPixels
+        val dimensionScale = maxDimension.toDouble() / max(width, height).toDouble()
+        val pixelScale = sqrt(maxPixels.toDouble() / (width.toDouble() * height.toDouble()))
         val scale = min(1.0, min(dimensionScale, pixelScale))
         if (scale >= 1.0) return width to height
         val tw = max(1, (width * scale).roundToInt())
@@ -190,6 +196,9 @@ class ImageLoader(private val context: Context) {
     private companion object {
         const val TAG = "SwiftPicImage"
         const val MAX_CACHED_BITMAP_BYTES = 24 * 1024 * 1024
+        const val EXTREME_ASPECT = 3L
+        const val EXTREME_MAX_DIMENSION = 20_000
+        const val EXTREME_MAX_PIXELS = 10_000_000L
 
         fun cacheBytes(): Int {
             val heap = Runtime.getRuntime().maxMemory()

@@ -42,6 +42,7 @@ class MainActivity : BaseActivity() {
     private lateinit var adapter: MainAdapter
     private val app get() = swiftPic
     private var loading = false
+    private var pullRefresh = false
     private var loadedOnce = false
     private var lastAccess = false
     private var lastUserDataVersion = -1
@@ -104,6 +105,17 @@ class MainActivity : BaseActivity() {
             listMode = currentHomeLayout == HomeLayout.LIST
         )
         setupRecyclerView()
+        binding.swipeRefresh.setColorSchemeColors(getColor(R.color.accent))
+        binding.swipeRefresh.setProgressBackgroundColorSchemeColor(getColor(R.color.surface_high))
+        binding.swipeRefresh.setOnRefreshListener {
+            if (MediaPermissions.canReadImages(this)) {
+                pullRefresh = true
+                loadLibrary(force = true)
+            } else {
+                binding.swipeRefresh.isRefreshing = false
+                requestOrSettings()
+            }
+        }
 
         binding.toolbar.setOnMenuItemClickListener { item ->
             when (item.itemId) {
@@ -222,14 +234,17 @@ class MainActivity : BaseActivity() {
     }
 
     private fun loadLibrary(force: Boolean) {
-        if (loading) return
+        if (loading) {
+            binding.swipeRefresh.isRefreshing = false
+            return
+        }
         loading = true
         val cached = app.gallery.peek()
         if (cached == null) {
             binding.loading.visibility = View.VISIBLE
             binding.emptyState.visibility = View.GONE
             binding.albums.visibility = View.GONE
-        } else if (force) {
+        } else if (force && !pullRefresh) {
             binding.refreshProgress.visibility = View.VISIBLE
         }
 
@@ -245,6 +260,8 @@ class MainActivity : BaseActivity() {
                 )
             } finally {
                 loading = false
+                pullRefresh = false
+                binding.swipeRefresh.isRefreshing = false
                 binding.loading.visibility = View.GONE
                 binding.refreshProgress.visibility = View.GONE
             }

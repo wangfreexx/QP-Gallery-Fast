@@ -166,12 +166,22 @@ class PhotoPageHolder(
             return
         }
         val wasHidden = badge.visibility != View.VISIBLE
-        badge.text = String.format(java.util.Locale.US, "%.1fx", ratio)
+        val text = String.format(java.util.Locale.US, "%.1fx", ratio)
+        if (badge.text?.toString() != text) badge.text = text
+        if (wasHidden) positionZoomBadge()
         badge.visibility = View.VISIBLE
         if (wasHidden) {
-            Log.d("SwiftPicPage", "zoom badge ${badge.text} name=${photo.name}")
+            Log.d("SwiftPicPage", "zoom badge $text name=${photo.name}")
         }
         badge.postDelayed(hideZoomBadge, 1400L)
+    }
+
+    /** The header name/date sits exactly where the badge used to float. */
+    private fun positionZoomBadge() {
+        val chrome = activity.findViewById<View>(R.id.topChrome)
+        val density = activity.resources.displayMetrics.density
+        val top = if (chrome != null && chrome.visibility == View.VISIBLE) chrome.bottom else 0
+        binding.zoomBadge.y = top + 10f * density
     }
 
     fun setActive(active: Boolean) {
