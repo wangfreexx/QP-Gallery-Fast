@@ -94,6 +94,15 @@ class MainAdapter(
         super.onViewRecycled(holder)
     }
 
+    override fun onViewDetachedFromWindow(holder: RecyclerView.ViewHolder) {
+        when (holder) {
+            is BannerHolder -> holder.cancel()
+            is AlbumHolder -> holder.cancel()
+            is AlbumListHolder -> holder.cancel()
+        }
+        super.onViewDetachedFromWindow(holder)
+    }
+
     private inner class BannerHolder(
         private val binding: ItemAlbumBannerBinding
     ) : RecyclerView.ViewHolder(binding.root) {
@@ -141,6 +150,8 @@ class MainAdapter(
     ) : RecyclerView.ViewHolder(binding.root) {
 
         private val jobs = ArrayList<Job>(3)
+        private val backs = ArrayList<Photo>(2)
+        private val tagViews = arrayOf(binding.albumTag1, binding.albumTag2)
 
         fun bind(item: MainItem.AlbumRow) {
             val context = binding.root.context
@@ -163,10 +174,13 @@ class MainAdapter(
             }
 
             val front = item.cover ?: album.cover
-            val backs = ArrayList<Photo>(2)
+            backs.clear()
             if (stackedCovers) {
-                album.photos.forEach { photo ->
-                    if (backs.size < 2 && photo.stableKey != front?.stableKey) {
+                // 找满两张即可停止：相册可能有几万张照片，forEach 无法 break 会让
+                // 每一行都做一次全表遍历。
+                for (photo in album.photos) {
+                    if (backs.size >= 2) break
+                    if (photo.stableKey != front?.stableKey) {
                         backs.add(photo)
                     }
                 }
@@ -183,8 +197,7 @@ class MainAdapter(
         private fun bindTags(album: Album) {
             val tags = binding.root.context.swiftPic.userData.albumTags(album.key).take(2)
             binding.albumTags.visibility = if (tags.isEmpty()) View.GONE else View.VISIBLE
-            val views = arrayOf(binding.albumTag1, binding.albumTag2)
-            views.forEachIndexed { index, view ->
+            tagViews.forEachIndexed { index, view ->
                 val tag = tags.getOrNull(index)
                 if (tag == null) {
                     view.visibility = View.GONE

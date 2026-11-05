@@ -30,6 +30,10 @@ object LiveDetector {
 
     fun cached(photo: Photo): Boolean? = cache.get(key(photo))
 
+    fun evictAll() {
+        cache.evictAll()
+    }
+
     suspend fun isLive(context: Context, photo: Photo): Boolean {
         if (photo.hasLivePair) return true
         if (!photo.canContainMotionPhoto) return false
@@ -47,12 +51,14 @@ object LiveDetector {
     }
 
     private fun scanHead(context: Context, uri: Uri): Boolean {
-        val head = runCatching {
+        val head = try {
             context.contentResolver.openInputStream(uri)?.use { input ->
                 input.buffered(64 * 1024).readUpTo(HEAD_BYTES)
             }
-        }.onFailure { android.util.Log.w("SwiftPicLive", "open failed $uri", it) }
-            .getOrNull() ?: return false
+        } catch (e: Exception) {
+            android.util.Log.w("SwiftPicLive", "open failed $uri", e)
+            null
+        } ?: return false
         if (head.isEmpty()) return false
         return markers.any { marker -> head.indexOfAscii(marker) >= 0 }
     }

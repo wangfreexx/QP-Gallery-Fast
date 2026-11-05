@@ -23,6 +23,17 @@
         android:visibility="gone" />
 
     <TextView
+        android:id="@+id/photoCoverBadge"
+        style="@style/Widget.SwiftPic.Badge"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="4dp"
+        android:text="@string/cover_badge"
+        android:textColor="@color/hdr_gold"
+        android:visibility="gone" />
+
+    <TextView
         android:id="@+id/photoHdrBadge"
         style="@style/Widget.SwiftPic.Badge"
         android:layout_width="wrap_content"

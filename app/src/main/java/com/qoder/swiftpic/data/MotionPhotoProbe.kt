@@ -4,41 +4,55 @@ import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
 import android.util.Log
+import android.util.LruCache
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
-import java.util.concurrent.ConcurrentHashMap
+import java.security.MessageDigest
+import java.util.concurrent.CancellationException
 
 class MotionPhotoProbe(private val context: Context) {
 
     private val resolver: ContentResolver = context.contentResolver
-    private val cache = ConcurrentHashMap<String, LiveProbeResult>()
+    private val cache = LruCache<String, LiveProbeResult>(MAX_CACHE_ENTRIES)
     private val extractMutex = Mutex()
 
     suspend fun probe(photo: Photo): LiveProbeResult = withContext(Dispatchers.IO) {
         val key = key(photo)
-        cache[key]?.let { return@withContext it }
+        cache.get(key)?.let { return@withContext it }
         val started = System.currentTimeMillis()
-        val result = runCatching { probeInternal(photo) }
-            .onFailure { Log.w(TAG, "probe failed for ${photo.uri}", it) }
-            .getOrElse { LiveProbeResult(null) }
-        cache[key] = result
+        val result = try {
+            probeInternal(photo)
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            Log.w(TAG, "probe failed for ${photo.uri}", e)
+            LiveProbeResult(null)
+        }
+        cache.put(key, result)
         Log.d(TAG, "probe ${photo.name}: found=${result.found} in ${System.currentTimeMillis() - started}ms")
         result
     }
 
-    fun cached(photo: Photo): LiveProbeResult? = cache[key(photo)]
+    fun cached(photo: Photo): LiveProbeResult? = cache.get(key(photo))
+
+    /** Clears only the in-memory probe result cache. */
+    fun clearMemoryCache() {
+        cache.evictAll()
+    }
 
     suspend fun extract(photo: Photo, part: MotionPart): File = withContext(Dispatchers.IO) {
         val dir = File(context.cacheDir, "motion").apply { mkdirs() }
-        val uriHash = photo.uri.toString().hashCode()
+        val uriHash = sha16(photo.uri.toString())
         val out = File(
             dir,
-            "${photo.id}_${uriHash}_${photo.sizeBytes}_${photo.dateModifiedMs}.mp4"
+            "${photo.id}_${uriHash}_${photo.sizeBytes}_${photo.dateModifiedMs}_${part.offset}.mp4"
         )
         if (out.isFile && out.length() == part.length) return@withContext out
 
@@ -56,50 +70,78 @@ class MotionPhotoProbe(private val context: Context) {
                 if (tmp.length() != part.length) {
                     throw IOException("motion video truncated: ${tmp.length()} != ${part.length}")
                 }
-                if (out.exists()) out.delete()
-                if (!tmp.renameTo(out)) {
-                    tmp.copyTo(out, overwrite = true)
-                    tmp.delete()
+
+                // Atomic replace. tmp is complete and validated before we touch the
+                // destination: on Android renameTo fails when the target exists, so
+                // move any stale entry aside (it can be restored on failure) instead
+                // of deleting a possibly valid file up front.
+                val backup = File(dir, out.name + ".bak")
+                if (backup.exists()) backup.delete()
+                val hadExisting = out.exists()
+                if (hadExisting && !out.renameTo(backup)) {
+                    throw IOException("cannot move existing motion cache $out aside")
                 }
+                if (!tmp.renameTo(out)) {
+                    if (hadExisting) backup.renameTo(out)
+                    throw IOException("cannot install motion cache $out")
+                }
+                if (hadExisting) backup.delete()
                 out
-            } catch (t: Throwable) {
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 tmp.delete()
-                throw t
+                Log.w(TAG, "extract motion video failed for ${photo.uri}", e)
+                throw e
             }
         }
     }
 
-    fun diskCacheBytes(): Long =
-        File(context.cacheDir, "motion").walk()
+    fun diskCacheBytes(): Long {
+        val dir = File(context.cacheDir, "motion")
+        if (!dir.isDirectory) return 0L
+        return dir.walk()
             .filter { it.isFile }
             .sumOf { it.length() }
+    }
 
     fun clearDiskCache() {
-        File(context.cacheDir, "motion").deleteRecursively()
+        clearMemoryCache()
+        try {
+            File(context.cacheDir, "motion").deleteRecursively()
+        } catch (e: Exception) {
+            Log.w(TAG, "clearDiskCache failed", e)
+        }
     }
 
     fun trimCache() {
-        Thread {
-            val dir = File(context.cacheDir, "motion")
-            if (!dir.isDirectory) return@Thread
-            val now = System.currentTimeMillis()
-            var total = 0L
-            val files = dir.listFiles()?.filter { it.isFile }?.sortedByDescending { it.lastModified() }
-                ?: return@Thread
-            files.forEach { file ->
-                if (now - file.lastModified() > 7L * 24 * 3600 * 1000) {
-                    file.delete()
-                } else {
-                    total += file.length()
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            try {
+                extractMutex.withLock {
+                    val dir = File(context.cacheDir, "motion")
+                    if (!dir.isDirectory) return@withLock
+                    val now = System.currentTimeMillis()
+                    var total = 0L
+                    val files = dir.listFiles()?.filter { it.isFile }
+                        ?.sortedByDescending { it.lastModified() } ?: return@withLock
+                    files.forEach { file ->
+                        if (now - file.lastModified() > 7L * 24 * 3600 * 1000) {
+                            file.delete()
+                        } else {
+                            total += file.length()
+                        }
+                    }
+                    val limit = 256L * 1024 * 1024
+                    var kept = 0L
+                    files.filter { it.exists() }.forEach { file ->
+                        kept += file.length()
+                        if (total > limit && kept > limit) file.delete()
+                    }
                 }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                Log.w(TAG, "trimCache failed", e)
             }
-            val limit = 256L * 1024 * 1024
-            var kept = 0L
-            files.filter { it.exists() }.forEach { file ->
-                kept += file.length()
-                if (total > limit && kept > limit) file.delete()
-            }
-        }.apply { isDaemon = true }.start()
+        }
     }
 
     private fun probeInternal(photo: Photo): LiveProbeResult {
@@ -108,9 +150,12 @@ class MotionPhotoProbe(private val context: Context) {
             when {
                 descriptor.length > 0 -> descriptor.length
                 else -> {
-                    val stat = runCatching {
+                    val stat = try {
                         descriptor.parcelFileDescriptor.statSize
-                    }.getOrDefault(-1L)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "statSize failed for ${photo.uri}", e)
+                        -1L
+                    }
                     if (stat > 0) stat else photo.sizeBytes
                 }
             }
@@ -122,27 +167,36 @@ class MotionPhotoProbe(private val context: Context) {
         if (head.isEmpty()) return LiveProbeResult(null)
         val tailLen = minOf(fileSize, TAIL_BYTES).toInt()
         val tail = readTail(photo.uri, fileSize, tailLen)
+        // A motion photo's video lives at the tail. Do not trust head-only XMP
+        // metadata (e.g. MicroVideoOffset) when the tail could not be read.
+        if (tail.isEmpty()) return LiveProbeResult(null)
         val tailStart = fileSize - tail.size
         val part = MotionPhotoParser.parse(head, tail, tailStart, fileSize)
         return LiveProbeResult(part)
     }
 
     private fun readHead(uri: Uri, max: Int): ByteArray {
-        return runCatching {
+        return try {
             openAssetStream(uri).use { input ->
                 input.buffered(64 * 1024).readUpTo(max)
             }
-        }.getOrElse { ByteArray(0) }
+        } catch (e: IOException) {
+            Log.w(TAG, "readHead failed for $uri", e)
+            ByteArray(0)
+        }
     }
 
     private fun readTail(uri: Uri, fileSize: Long, tailLen: Int): ByteArray {
-        return runCatching {
+        return try {
             openAssetStream(uri).use { input ->
                 val buffered = input.buffered(64 * 1024)
                 skipFully(buffered, fileSize - tailLen)
                 buffered.readUpTo(tailLen)
             }
-        }.getOrElse { ByteArray(0) }
+        } catch (e: IOException) {
+            Log.w(TAG, "readTail failed for $uri", e)
+            ByteArray(0)
+        }
     }
 
     private fun openAssetStream(uri: Uri): InputStream {
@@ -150,9 +204,13 @@ class MotionPhotoProbe(private val context: Context) {
             ?: throw IOException("cannot open $uri")
         return try {
             afd.createInputStream()
-        } catch (t: Throwable) {
-            runCatching { afd.close() }
-            throw t
+        } catch (e: Exception) {
+            try {
+                afd.close()
+            } catch (closeError: Exception) {
+                Log.w(TAG, "close afd failed for $uri", closeError)
+            }
+            throw e
         }
     }
 
@@ -195,6 +253,20 @@ class MotionPhotoProbe(private val context: Context) {
         }
     }
 
+    private fun sha16(text: String): String = try {
+        val digest = MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
+        buildString(16) {
+            for (i in 0 until 8) {
+                val b = digest[i].toInt() and 0xFF
+                append(HEX[b ushr 4])
+                append(HEX[b and 0x0F])
+            }
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "SHA-256 unavailable", e)
+        text.hashCode().toString(16).padStart(8, '0')
+    }
+
     private fun key(photo: Photo): String =
         "${photo.uri}|${photo.sizeBytes}|${photo.dateModifiedMs}"
 
@@ -202,5 +274,7 @@ class MotionPhotoProbe(private val context: Context) {
         const val TAG = "SwiftPicMotion"
         const val HEAD_BYTES = 1024 * 1024
         const val TAIL_BYTES = 16L * 1024 * 1024
+        const val MAX_CACHE_ENTRIES = 256
+        val HEX = "0123456789abcdef".toCharArray()
     }
 }

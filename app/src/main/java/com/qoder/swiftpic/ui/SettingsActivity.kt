@@ -4,11 +4,11 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.DocumentsContract
+import android.util.Log
 import android.view.LayoutInflater
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
-import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -18,6 +18,7 @@ import com.qoder.swiftpic.data.BackgroundMode
 import com.qoder.swiftpic.data.HomeLayout
 import com.qoder.swiftpic.data.OrientationMode
 import com.qoder.swiftpic.data.ThemeMode
+import com.qoder.swiftpic.data.TransparencyBackdrop
 import com.qoder.swiftpic.data.TransitionMode
 import com.qoder.swiftpic.data.WallpaperBackground
 import com.qoder.swiftpic.util.Formats
@@ -39,6 +40,7 @@ class SettingsActivity : BaseActivity() {
 
     private var pendingInclude = true
     private var cacheValue = ""
+    private var lastRowsFingerprint: String? = null
     private val folderPicker = registerForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
@@ -53,26 +55,32 @@ class SettingsActivity : BaseActivity() {
             return@registerForActivityResult
         }
         lifecycleScope.launch {
-            val stored = withContext(Dispatchers.IO) {
-                runCatching {
+            val permissionGranted = withContext(Dispatchers.IO) {
+                try {
                     contentResolver.takePersistableUriPermission(
                         uri,
                         Intent.FLAG_GRANT_READ_URI_PERMISSION
                     )
+                    true
+                } catch (e: Exception) {
+                    Log.w(TAG, "takePersistableUriPermission failed for $uri", e)
+                    false
                 }
+            }
+            if (!permissionGranted) {
+                AppHint.show(this@SettingsActivity, R.string.background_pick_failed)
+                buildRows()
+                return@launch
+            }
+            val stored = withContext(Dispatchers.IO) {
                 WallpaperBackground.setCustomImage(this@SettingsActivity, uri)
             }
             if (stored) {
                 prefs.backgroundMode = BackgroundMode.CUSTOM
-                Toast.makeText(this@SettingsActivity, R.string.background_pick_done, Toast.LENGTH_SHORT)
-                    .show()
+                AppHint.show(this@SettingsActivity, R.string.background_pick_done)
                 recreate()
             } else {
-                Toast.makeText(
-                    this@SettingsActivity,
-                    R.string.background_pick_failed,
-                    Toast.LENGTH_SHORT
-                ).show()
+                AppHint.show(this@SettingsActivity, R.string.background_pick_failed)
                 buildRows()
             }
         }
@@ -82,10 +90,18 @@ class SettingsActivity : BaseActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivitySettingsBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        // SAF tree picker can outlive the process; restore whether the pending
+        // result belongs to "include" or "exclude" so it is never misapplied.
+        pendingInclude = savedInstanceState?.getBoolean(KEY_PENDING_INCLUDE, true) ?: true
         binding.toolbar.setNavigationOnClickListener { finish() }
         ThemeUtils.tintToolbarMenu(binding.toolbar)
         buildRows()
         refreshCacheSize()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(KEY_PENDING_INCLUDE, pendingInclude)
     }
 
     override fun onResume() {
@@ -93,7 +109,38 @@ class SettingsActivity : BaseActivity() {
         if (::binding.isInitialized) buildRows()
     }
 
+    /**
+     * Fingerprint of every value rendered by [buildRows]. onResume rebuilds the
+     * whole list on every return; skip that work when nothing actually changed.
+     */
+    private fun rowsFingerprint(): String = buildString {
+        append(prefs.themeMode).append('|')
+        append(prefs.backgroundMode).append('|')
+        append(prefs.backgroundBlur).append('|')
+        append(prefs.transparencyBackdrop).append('|')
+        append(prefs.gridColumns).append('|')
+        append(prefs.homeLayout).append('|')
+        append(prefs.animationScale).append('|')
+        append(prefs.transitionMode).append('|')
+        append(prefs.transitionDurationMs).append('|')
+        append(prefs.tapPaging).append('|')
+        append(prefs.includePaths.sorted()).append('|')
+        append(prefs.excludePaths.sorted()).append('|')
+        append(app.userData.albumSort).append('|')
+        append(prefs.sortMode).append('|')
+        append(prefs.keepScreenOn).append('|')
+        append(prefs.chromeAutoHideMs).append('|')
+        append(prefs.orientationMode).append('|')
+        append(prefs.hdrEnabled).append('|')
+        append(prefs.liveAutoPlay).append('|')
+        append(prefs.liveMuted).append('|')
+        append(cacheValue)
+    }
+
     private fun buildRows() {
+        val fingerprint = rowsFingerprint()
+        if (fingerprint == lastRowsFingerprint) return
+        lastRowsFingerprint = fingerprint
         binding.settingsContent.removeAllViews()
         addHeader(getString(R.string.settings_appearance))
         addChoice(
@@ -111,6 +158,11 @@ class SettingsActivity : BaseActivity() {
             summary = getString(R.string.background_blur_summary),
             value = getString(R.string.background_blur_value, prefs.backgroundBlur)
         ) { showBackgroundBlurDialog() }
+        addChoice(
+            title = getString(R.string.transparency_backdrop),
+            summary = getString(R.string.transparency_backdrop_summary),
+            value = transparencyBackdropLabel(prefs.transparencyBackdrop)
+        ) { showTransparencyBackdropDialog() }
         addChoice(
             title = getString(R.string.grid_columns),
             summary = getString(R.string.grid_columns_summary),
@@ -212,7 +264,7 @@ class SettingsActivity : BaseActivity() {
         addHeader(getString(R.string.settings_other))
         val version = runCatching {
             packageManager.getPackageInfo(packageName, 0).versionName
-        }.getOrNull().orEmpty()
+        }.onFailure { Log.w(TAG, "getPackageInfo failed", it) }.getOrNull().orEmpty()
         addChoice(
             title = getString(R.string.about),
             summary = getString(R.string.version_label, version),
@@ -303,7 +355,8 @@ class SettingsActivity : BaseActivity() {
 
     private fun pickBackgroundImage() {
         runCatching { backgroundPicker.launch(arrayOf("image/*")) }.onFailure {
-            Toast.makeText(this, R.string.path_picker_unavailable, Toast.LENGTH_SHORT).show()
+            Log.w(TAG, "background picker unavailable", it)
+            AppHint.show(this, R.string.path_picker_unavailable)
         }
     }
 
@@ -314,6 +367,32 @@ class SettingsActivity : BaseActivity() {
             BackgroundMode.THEME -> R.string.background_theme
         }
     )
+
+    private fun transparencyBackdropLabel(mode: TransparencyBackdrop): String = getString(
+        when (mode) {
+            TransparencyBackdrop.BLACK -> R.string.transparency_backdrop_black
+            TransparencyBackdrop.CHECKER -> R.string.transparency_backdrop_checker
+        }
+    )
+
+    private fun showTransparencyBackdropDialog() {
+        val modes = TransparencyBackdrop.values()
+        val labels = arrayOf(
+            getString(R.string.transparency_backdrop_black),
+            getString(R.string.transparency_backdrop_checker)
+        )
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.transparency_backdrop)
+            .setSingleChoiceItems(
+                labels,
+                modes.indexOf(prefs.transparencyBackdrop)
+            ) { dialog, which ->
+                prefs.transparencyBackdrop = modes[which]
+                dialog.dismiss()
+                buildRows()
+            }
+            .showMotion()
+    }
 
     private fun showBackgroundBlurDialog() {
         val pad = (20 * resources.displayMetrics.density).toInt()
@@ -528,11 +607,8 @@ class SettingsActivity : BaseActivity() {
                     which == 0 -> {
                         pendingInclude = include
                         runCatching { folderPicker.launch(null) }.onFailure {
-                            Toast.makeText(
-                                this,
-                                R.string.path_picker_unavailable,
-                                Toast.LENGTH_SHORT
-                            ).show()
+                            Log.w(TAG, "folder picker unavailable", it)
+                            AppHint.show(this, R.string.path_picker_unavailable)
                         }
                     }
                     which <= current.size -> {
@@ -555,10 +631,30 @@ class SettingsActivity : BaseActivity() {
     }
 
     private fun addFilterPath(uri: Uri, include: Boolean) {
-        val docId = runCatching { DocumentsContract.getTreeDocumentId(uri) }.getOrNull()
-        val path = docId?.substringAfter(':', "")?.trim('/')?.takeIf { it.isNotEmpty() }
+        // Only the system external-storage DocumentsProvider exposes paths that
+        // match MediaStore RELATIVE_PATH values used by the gallery filters.
+        if (uri.authority != EXTERNAL_STORAGE_AUTHORITY) {
+            AppHint.show(this, "仅支持系统「外部存储」提供的文件夹")
+            return
+        }
+        val docId = try {
+            DocumentsContract.getTreeDocumentId(uri)
+        } catch (e: Exception) {
+            Log.w(TAG, "getTreeDocumentId failed for $uri", e)
+            null
+        }
+        // Tree document ids are "volume:path"; only the path part is a usable
+        // filter value (the volume prefix must not be stored).
+        val path = docId?.let { id ->
+            val separator = id.indexOf(':')
+            if (separator >= 0) {
+                id.substring(separator + 1).trim('/').takeIf { it.isNotEmpty() }
+            } else {
+                null
+            }
+        }
         if (path == null) {
-            Toast.makeText(this, R.string.path_pick_invalid, Toast.LENGTH_SHORT).show()
+            AppHint.show(this, R.string.path_pick_invalid)
             return
         }
         val set = (if (include) prefs.includePaths else prefs.excludePaths).toMutableSet()
@@ -566,16 +662,20 @@ class SettingsActivity : BaseActivity() {
         if (include) prefs.includePaths = set else prefs.excludePaths = set
         app.gallery.markDirty()
         buildRows()
-        Toast.makeText(this, getString(R.string.path_added, path), Toast.LENGTH_SHORT).show()
+        AppHint.show(this, getString(R.string.path_added, path))
     }
 
     private fun clearCache() {
         app.thumbnails.evictAll()
         app.images.evictAll()
+        // Invalidate in-memory probe results first: a cached entry must not point
+        // at a file that the disk sweep below is about to remove (e.g. one that
+        // is currently being played).
+        app.motion.clearMemoryCache()
         lifecycleScope.launch(Dispatchers.IO) {
             app.motion.clearDiskCache()
             withContext(Dispatchers.Main) {
-                Toast.makeText(this@SettingsActivity, R.string.cache_cleared, Toast.LENGTH_SHORT).show()
+                AppHint.show(this@SettingsActivity, R.string.cache_cleared)
                 refreshCacheSize()
             }
         }
@@ -638,4 +738,10 @@ class SettingsActivity : BaseActivity() {
     private fun pathsLabel(paths: Set<String>): String =
         if (paths.isEmpty()) getString(R.string.paths_value_all)
         else getString(R.string.paths_value_n, paths.size)
+
+    private companion object {
+        const val TAG = "SwiftPicSettings"
+        const val KEY_PENDING_INCLUDE = "settings_pending_include"
+        const val EXTERNAL_STORAGE_AUTHORITY = "com.android.externalstorage.documents"
+    }
 }

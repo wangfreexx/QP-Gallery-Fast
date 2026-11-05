@@ -15,6 +15,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import java.util.concurrent.CancellationException
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -60,10 +61,14 @@ class ImageLoader(private val context: Context) {
     private val resolver: ContentResolver = context.contentResolver
     private val semaphore = Semaphore(3)
 
-    private val cache = object : LruCache<String, DecodedImage.Still>(cacheBytes()) {
+    private val cacheMaxBytes = cacheBytes()
+    private val cache = object : LruCache<String, DecodedImage.Still>(cacheMaxBytes) {
         override fun sizeOf(key: String, value: DecodedImage.Still): Int =
             value.bitmap.allocationByteCount
     }
+
+    /** A single bitmap may use at most half the cache, or put() evicts it instantly. */
+    private val maxCachedBitmapBytes = cacheMaxBytes / 2
 
     suspend fun decode(photo: Photo, spec: DecodeSpec): DecodedImage {
         val cacheKey = key(photo, spec)
@@ -73,12 +78,12 @@ class ImageLoader(private val context: Context) {
                 cache.get(cacheKey)?.let { return@withPermit it }
                 val started = System.currentTimeMillis()
                 var attemptSpec = spec
-                var lastError: Throwable? = null
-                repeat(2) {
+                var pendingOom: OutOfMemoryError? = null
+                repeat(2) { attempt ->
                     try {
                         val result = decodeInternal(photo, attemptSpec)
                         if (result is DecodedImage.Still &&
-                            result.bitmap.allocationByteCount < MAX_CACHED_BITMAP_BYTES
+                            result.bitmap.allocationByteCount < maxCachedBitmapBytes
                         ) {
                             cache.put(cacheKey, result)
                         }
@@ -93,20 +98,30 @@ class ImageLoader(private val context: Context) {
                             }} in ${System.currentTimeMillis() - started}ms"
                         )
                         return@withPermit result
-                    } catch (t: Throwable) {
-                        lastError = t
-                        if (t is OutOfMemoryError) {
-                            cache.evictAll()
+                    } catch (e: CancellationException) {
+                        // Coroutine cancellation must never be swallowed.
+                        throw e
+                    } catch (e: OutOfMemoryError) {
+                        // OOM is an Error: handle it in a dedicated branch (free
+                        // the cache and retry smaller), but never swallow it —
+                        // rethrow if the retry also runs out of memory.
+                        pendingOom = e
+                        cache.evictAll()
+                        if (attempt == 0) {
                             attemptSpec = DecodeSpec(
                                 maxDimension = max(512, attemptSpec.maxDimension / 2),
                                 maxPixels = max(1_000_000L, attemptSpec.maxPixels / 4)
                             )
-                        } else {
-                            throw t
                         }
+                    } catch (e: Exception) {
+                        // Only Exception is caught (never Throwable): regular
+                        // decode failures propagate immediately as before.
+                        throw e
                     }
                 }
-                throw ImageDecodeException("无法解码 ${photo.name}", lastError)
+                // Both attempts ran out of memory: propagate the Error, don't hide it.
+                val fatal: Throwable = pendingOom ?: ImageDecodeException("无法解码 ${photo.name}")
+                throw fatal
             }
         }
     }
@@ -195,10 +210,9 @@ class ImageLoader(private val context: Context) {
 
     private companion object {
         const val TAG = "SwiftPicImage"
-        const val MAX_CACHED_BITMAP_BYTES = 24 * 1024 * 1024
         const val EXTREME_ASPECT = 3L
         const val EXTREME_MAX_DIMENSION = 20_000
-        const val EXTREME_MAX_PIXELS = 10_000_000L
+        const val EXTREME_MAX_PIXELS = 6_000_000L
 
         fun cacheBytes(): Int {
             val heap = Runtime.getRuntime().maxMemory()

@@ -3,10 +3,12 @@ package com.qoder.swiftpic.ui.viewer
 import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.Shader
 import android.graphics.drawable.AnimatedImageDrawable
 import android.graphics.drawable.Drawable
 import android.os.SystemClock
@@ -18,7 +20,9 @@ import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.animation.DecelerateInterpolator
 import android.widget.OverScroller
+import com.qoder.swiftpic.data.TransparencyBackdrop
 import com.qoder.swiftpic.swiftPic
+import com.qoder.swiftpic.ui.widget.CheckerPattern
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -40,6 +44,15 @@ class ZoomImageView @JvmOverloads constructor(
     private var imageHeight = 0
 
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+    private val checkerPaint = Paint().apply {
+        shader = BitmapShader(
+            CheckerPattern.bitmap(context, dark = true),
+            Shader.TileMode.REPEAT,
+            Shader.TileMode.REPEAT
+        )
+        isFilterBitmap = false
+        isAntiAlias = false
+    }
     private val matrix = Matrix()
 
     private var scale = 1f
@@ -81,6 +94,8 @@ class ZoomImageView @JvmOverloads constructor(
     private var animator: ValueAnimator? = null
 
     var onTap: ((Float, Float) -> Unit)? = null
+    /** Returns false for the left/right paging strips, where a double tap must not zoom. */
+    var doubleTapAllowed: ((Float) -> Boolean)? = null
     var onLongPressStart: (() -> Unit)? = null
     var onLongPressEnd: (() -> Unit)? = null
     var onEdgePage: ((Int) -> Unit)? = null
@@ -102,6 +117,7 @@ class ZoomImageView @JvmOverloads constructor(
     }
 
     fun setBitmap(newBitmap: Bitmap) {
+        cancelFling()
         if (bitmap === newBitmap && drawable == null) return
         stopDrawable()
         val dimensionsChanged = newBitmap.width != imageWidth || newBitmap.height != imageHeight
@@ -114,6 +130,8 @@ class ZoomImageView @JvmOverloads constructor(
     }
 
     fun setFrameBitmap(newBitmap: Bitmap) {
+        // 与 setBitmap 一致：先停掉可能残留的动画 drawable，避免帧图与动画叠画。
+        stopDrawable()
         val dimensionsChanged = newBitmap.width != imageWidth || newBitmap.height != imageHeight
         bitmap = newBitmap
         if (dimensionsChanged) {
@@ -140,6 +158,7 @@ class ZoomImageView @JvmOverloads constructor(
     }
 
     fun clearImage() {
+        cancelFling()
         stopDrawable()
         bitmap = null
         drawable = null
@@ -224,6 +243,19 @@ class ZoomImageView @JvmOverloads constructor(
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        if (imageWidth > 0 && imageHeight > 0 &&
+            context.swiftPic.prefs.transparencyBackdrop == TransparencyBackdrop.CHECKER
+        ) {
+            val left = tx
+            val top = ty
+            canvas.drawRect(
+                left,
+                top,
+                left + imageWidth * scale,
+                top + imageHeight * scale,
+                checkerPaint
+            )
+        }
         val currentBitmap = bitmap
         val currentDrawable = drawable
         if (currentBitmap != null) {
@@ -241,6 +273,8 @@ class ZoomImageView @JvmOverloads constructor(
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        // 无图时不要把事件吃掉，交给父级 ViewPager2 处理翻页。
+        if (imageWidth <= 0) return false
         scaleDetector.onTouchEvent(event)
         gestureDetector.onTouchEvent(event)
         when (event.actionMasked) {
@@ -254,6 +288,15 @@ class ZoomImageView @JvmOverloads constructor(
                     parent?.requestDisallowInterceptTouchEvent(true)
                 }
             }
+            MotionEvent.ACTION_POINTER_UP -> {
+                // 双指变单指时，剩余手指的位移不应继续累积边缘翻页距离。
+                edgeAccum = 0f
+                edgeDirection = 0
+                if (longPressTriggered) {
+                    longPressTriggered = false
+                    onLongPressEnd?.invoke()
+                }
+            }
             MotionEvent.ACTION_MOVE -> {
                 if (!scaleDetector.isInProgress && scale > baseScale + 0.01f) {
                     parent?.requestDisallowInterceptTouchEvent(true)
@@ -264,6 +307,7 @@ class ZoomImageView @JvmOverloads constructor(
                     longPressTriggered = false
                     onLongPressEnd?.invoke()
                 }
+                parent?.requestDisallowInterceptTouchEvent(false)
             }
         }
         return true
@@ -410,6 +454,14 @@ class ZoomImageView @JvmOverloads constructor(
 
     override fun onDoubleTap(e: MotionEvent): Boolean {
         if (imageWidth <= 0) return false
+        val fraction = if (width > 0) e.x / width else 0.5f
+        if (doubleTapAllowed?.invoke(fraction) == false) {
+            // Both taps live in a paging strip: honor them as two taps instead of
+            // letting GestureDetector swallow one as a "double tap".
+            onTap?.invoke(e.x, e.y)
+            onTap?.invoke(e.x, e.y)
+            return true
+        }
         parent?.requestDisallowInterceptTouchEvent(true)
         if (abs(scale - baseScale) > baseScale * 0.02f) {
             // Any zoom level returns to fit with one tap.

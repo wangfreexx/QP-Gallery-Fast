@@ -2,6 +2,7 @@ package com.qoder.swiftpic.ui
 
 import android.app.Activity
 import android.graphics.Color
+import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -15,7 +16,15 @@ object AppHint {
 
     private const val TAG_HINT = "swiftpic_hint"
 
+    fun show(activity: Activity, resId: Int, durationMs: Long = 1800L) {
+        show(activity, activity.getString(resId), durationMs)
+    }
+
     fun show(activity: Activity, message: CharSequence, durationMs: Long = 1800L) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            activity.runOnUiThread { show(activity, message, durationMs) }
+            return
+        }
         val root = activity.window.decorView as? ViewGroup ?: return
         root.findViewWithTag<View>(TAG_HINT)?.let { root.removeView(it) }
 

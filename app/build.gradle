@@ -13,8 +13,8 @@ android {
         // 32 keeps READ_EXTERNAL_STORAGE grantable, which WallpaperManager still requires
         // to read the system wallpaper (it ignores the granular media permissions).
         targetSdk 32
-        versionCode 3
-        versionName "1.8.2"
+        versionCode 4
+        versionName "1.9.1"
     }
 
     buildFeatures {

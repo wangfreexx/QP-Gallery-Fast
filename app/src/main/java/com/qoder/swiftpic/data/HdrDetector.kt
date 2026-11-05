@@ -3,6 +3,7 @@ package com.qoder.swiftpic.data
 import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import android.util.LruCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
@@ -12,6 +13,7 @@ import kotlin.math.min
 
 object HdrDetector {
 
+    private const val TAG = "SwiftPicHdr"
     private const val MAX_HEAD_BYTES = 256 * 1024
     private val markers = arrayOf(
         "hdrgm".toByteArray(Charsets.US_ASCII),
@@ -20,25 +22,34 @@ object HdrDetector {
     private val guard = Semaphore(2)
     private val cache = LruCache<String, Boolean>(768)
 
+    /** Same identity as LiveDetector / MotionPhotoProbe, so caches agree. */
+    private fun key(photo: Photo): String =
+        "${photo.uri}|${photo.sizeBytes}|${photo.dateModifiedMs}"
+
     fun remember(photo: Photo, isHdr: Boolean) {
-        cache.put("${photo.uri}|${photo.dateModifiedMs}", isHdr)
+        cache.put(key(photo), isHdr)
     }
 
     suspend fun isHdr(context: Context, photo: Photo): Boolean {
-        val key = "${photo.uri}|${photo.dateModifiedMs}"
-        cache.get(key)?.let { return it }
+        val cacheKey = key(photo)
+        cache.get(cacheKey)?.let { return it }
         return withContext(Dispatchers.IO) {
             guard.withPermit {
-                cache.get(key)?.let { return@withPermit it }
+                // A concurrent request may have filled the cache while we waited.
+                cache.get(cacheKey)?.let { return@withPermit it }
                 val result = scan(context.contentResolver, photo.uri)
-                cache.put(key, result)
+                cache.put(cacheKey, result)
                 result
             }
         }
     }
 
+    fun evictAll() {
+        cache.evictAll()
+    }
+
     private fun scan(resolver: ContentResolver, uri: Uri): Boolean {
-        return runCatching {
+        return try {
             resolver.openInputStream(uri)?.use { input ->
                 val buffer = ByteArray(16 * 1024)
                 val carry = ByteArray(8)
@@ -57,7 +68,10 @@ object HdrDetector {
                 }
                 false
             } ?: false
-        }.getOrDefault(false)
+        } catch (e: Exception) {
+            Log.w(TAG, "hdr scan failed for $uri", e)
+            false
+        }
     }
 
     private fun contains(haystack: ByteArray, needle: ByteArray): Boolean {

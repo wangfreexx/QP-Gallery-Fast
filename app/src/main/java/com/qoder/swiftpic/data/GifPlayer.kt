@@ -6,10 +6,10 @@ import android.os.Looper
 import android.util.Log
 import com.bumptech.glide.gifdecoder.GifDecoder
 import com.bumptech.glide.gifdecoder.StandardGifDecoder
-import java.nio.ByteBuffer
 import java.util.ArrayDeque
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 class GifPlayer(
     private val source: GifSource,
@@ -34,8 +34,15 @@ class GifPlayer(
     var currentIndex: Int = -1
         private set
 
-    private var session = 0
+    /** Bumped on every state change so stale decode tasks are ignored. */
+    private val session = AtomicInteger(0)
+
+    @Volatile
     private var decoder: StandardGifDecoder? = null
+
+    /** Frame index [decoder] currently sits at; touched on the executor thread only. */
+    @Volatile
+    private var decoderFrameIndex: Int = -1
 
     val frameCount: Int = source.frameCount
 
@@ -47,7 +54,7 @@ class GifPlayer(
         isPlaying = true
         Log.d(TAG, "start frames=$frameCount sample=${source.sampleSize} at=$currentIndex")
         onPlayingChanged(true)
-        val token = ++session
+        val token = session.incrementAndGet()
         executor.execute { runPlayback(token) }
     }
 
@@ -55,7 +62,7 @@ class GifPlayer(
         if (!isPlaying) return
         Log.d(TAG, "pause at=$currentIndex")
         isPlaying = false
-        session++
+        session.incrementAndGet()
         onPlayingChanged(false)
     }
 
@@ -66,18 +73,29 @@ class GifPlayer(
         val target = index.coerceIn(0, frameCount - 1)
         Log.d(TAG, "seek -> $target")
         currentIndex = target
-        val token = ++session
+        val token = session.incrementAndGet()
         executor.execute {
             try {
-                val newDecoder = newDecoder()
-                val frame = decodeTo(newDecoder, target)
-                val old = decoder
-                decoder = newDecoder
-                old?.clear()
+                val existing = decoder
+                val from = decoderFrameIndex
+                val frame: Bitmap?
+                if (existing != null && from >= 0 && target > from) {
+                    // Reuse the live decoder and decode only the delta instead of
+                    // re-decoding every frame from 0 on every seek.
+                    frame = advanceFrom(existing, from, target)
+                    decoderFrameIndex = if (frame != null) target else -1
+                } else {
+                    val fresh = newDecoder()
+                    frame = decodeTo(fresh, target)
+                    val old = existing
+                    decoder = fresh
+                    decoderFrameIndex = if (frame != null) target else -1
+                    old?.clear()
+                }
                 if (frame == null) throw IllegalStateException("GIF frame decode failed")
                 postFrame(token, frame, target)
-            } catch (t: Throwable) {
-                postError(token, t)
+            } catch (e: Exception) {
+                postError(token, e)
             }
         }
     }
@@ -91,31 +109,37 @@ class GifPlayer(
         Log.d(TAG, "release")
         released = true
         isPlaying = false
-        session++
-        runCatching {
+        session.incrementAndGet()
+        mainHandler.removeCallbacksAndMessages(null)
+        try {
             executor.execute {
                 decoder?.clear()
                 decoder = null
+                decoderFrameIndex = -1
                 provider.recycleAll()
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "release cleanup rejected", e)
         }
         executor.shutdown()
     }
 
     private fun showSingleFrame() {
         if (released) return
-        val token = ++session
+        val token = session.incrementAndGet()
         executor.execute {
             try {
                 if (decoder == null) {
                     val d = newDecoder()
-                    val frame = decodeTo(d, 0) ?: throw IllegalStateException("GIF frame decode failed")
+                    val frame = decodeTo(d, 0)
+                        ?: throw IllegalStateException("GIF frame decode failed")
                     decoder = d
+                    decoderFrameIndex = 0
                     currentIndex = 0
                     postFrame(token, frame, 0)
                 }
-            } catch (t: Throwable) {
-                postError(token, t)
+            } catch (e: Exception) {
+                postError(token, e)
             }
         }
     }
@@ -128,32 +152,34 @@ class GifPlayer(
                 ?: throw IllegalStateException("GIF frame decode failed")
             val old = decoder
             decoder = newDecoder
+            decoderFrameIndex = startIndex
             currentIndex = startIndex
             old?.clear()
             postFrame(token, frame, startIndex)
             if (frameCount <= 1) return
 
-            while (token == session && isPlaying && !released) {
+            while (token == session.get() && isPlaying && !released) {
                 val d = decoder ?: break
                 val indexNow = currentIndex.coerceAtLeast(0)
                 val delay = normalizedDelay(d.getDelay(indexNow))
                 sleepWithChecks(delay, token)
-                if (token != session || !isPlaying || released) break
+                if (token != session.get() || !isPlaying || released) break
 
                 d.advance()
                 val nextFrame = d.getNextFrame() ?: break
                 val nextIndex = d.getCurrentFrameIndex()
+                decoderFrameIndex = nextIndex
                 currentIndex = nextIndex
                 postFrame(token, nextFrame, nextIndex)
             }
-        } catch (t: Throwable) {
-            postError(token, t)
+        } catch (e: Exception) {
+            postError(token, e)
         }
     }
 
     private fun sleepWithChecks(delayMs: Int, token: Int) {
         var remaining = delayMs.toLong()
-        while (remaining > 0 && token == session && isPlaying && !released) {
+        while (remaining > 0 && token == session.get() && isPlaying && !released) {
             val slice = remaining.coerceAtMost(20L)
             Thread.sleep(slice)
             remaining -= slice
@@ -175,24 +201,60 @@ class GifPlayer(
         return result
     }
 
+    /** Advances an already positioned decoder from [from] to [target], decoding only the delta. */
+    private fun advanceFrom(decoder: StandardGifDecoder, from: Int, target: Int): Bitmap? {
+        var result: Bitmap? = null
+        for (i in (from + 1)..target) {
+            decoder.advance()
+            val frame = decoder.getNextFrame() ?: return result
+            if (i == target) {
+                result = frame
+            } else {
+                provider.release(frame)
+            }
+        }
+        return result
+    }
+
     private fun postFrame(token: Int, bitmap: Bitmap, index: Int) {
         mainHandler.post {
-            if (released || token != session) {
-                provider.release(bitmap)
-                return@post
+            var handled = false
+            try {
+                if (released || token != session.get()) {
+                    provider.release(bitmap)
+                    handled = true
+                } else {
+                    if (index == 0) Log.d(TAG, "frame 0/$frameCount")
+                    onFrame(bitmap, index, frameCount)
+                    handled = true
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "frame delivery failed", e)
+            } finally {
+                if (!handled) {
+                    // Callback threw (or was stale): make sure the bitmap is returned
+                    // to the pool and never leaks, without crashing the main thread.
+                    try {
+                        provider.release(bitmap)
+                    } catch (releaseError: Exception) {
+                        Log.w(TAG, "release after frame failure failed", releaseError)
+                    }
+                }
             }
-            if (index == 0) Log.d(TAG, "frame 0/$frameCount")
-            onFrame(bitmap, index, frameCount)
         }
     }
 
     private fun postError(token: Int, throwable: Throwable) {
         Log.w(TAG, "GIF playback failed", throwable)
         mainHandler.post {
-            if (!released && token == session) {
-                isPlaying = false
-                onPlayingChanged(false)
-                onError(throwable)
+            try {
+                if (!released && token == session.get()) {
+                    isPlaying = false
+                    onPlayingChanged(false)
+                    onError(throwable)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "onError callback failed", e)
             }
         }
     }
@@ -209,7 +271,7 @@ class GifPlayer(
         val decoder = StandardGifDecoder(
             provider,
             source.header,
-            ByteBuffer.wrap(source.bytes),
+            source.buffer(),
             source.sampleSize
         )
         decoder.setDefaultBitmapConfig(Bitmap.Config.ARGB_8888)

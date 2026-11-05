@@ -5,9 +5,11 @@ import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.app.Activity
 import android.content.ActivityNotFoundException
+import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
+import android.net.Uri
 import android.text.InputType
 import android.widget.EditText
 import android.widget.ImageView
@@ -18,6 +20,7 @@ import android.os.Build
 import android.os.Bundle
 import android.print.PrintManager
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.util.Log
 import android.view.MotionEvent
 import android.view.View
@@ -70,6 +73,7 @@ class ViewerActivity : AppCompatActivity() {
 
     private var albumKey: String? = null
     private var query: String? = null
+    private var externalUri: Uri? = null
     private var isChromeVisible = true
     private var sliderTracking = false
     private var updatingSlider = false
@@ -86,8 +90,25 @@ class ViewerActivity : AppCompatActivity() {
     private var pendingDeletePosition = -1
     private var savedPosition = -1
     private var pageAnimator: ValueAnimator? = null
+    private var animTarget = -1
+    private var pageGeneration = 0
+    private var pageCallbackRegistered = false
+    private var moreMenu: PopupMenu? = null
+    private var verifyRunnable: Runnable? = null
+    private var lastAppliedTransition: TransitionMode? = null
     private val autoHideChrome = Runnable {
         if (!isFinishing && isChromeVisible) hideChrome()
+    }
+    private val syncActiveRunnable = Runnable {
+        if (!isFinishing && !isDestroyed && ::adapter.isInitialized) {
+            adapter.setActivePosition(binding.pager.currentItem)
+            refreshChrome()
+        }
+    }
+    private val initialSyncRunnable = Runnable {
+        if (isFinishing || isDestroyed || !::adapter.isInitialized) return@Runnable
+        syncActiveRunnable.run()
+        showChrome()
     }
 
     private val deleteLauncher = registerForActivityResult(
@@ -107,7 +128,8 @@ class ViewerActivity : AppCompatActivity() {
 
         override fun onTap(holder: PhotoPageHolder, xFraction: Float, yFraction: Float) {
             if (!::adapter.isInitialized) return
-            if (holder.bindingAdapterPosition != binding.pager.currentItem) return
+            val position = holder.bindingAdapterPosition
+            if (position != binding.pager.currentItem && position != animTarget) return
             val paged = app.prefs.tapPaging &&
                 xFraction in 0f..1f && yFraction in 0f..1f &&
                 when {
@@ -120,14 +142,23 @@ class ViewerActivity : AppCompatActivity() {
 
         override fun onPageRequest(holder: PhotoPageHolder, delta: Int) {
             if (!::adapter.isInitialized) return
-            if (holder.bindingAdapterPosition != binding.pager.currentItem) return
+            val position = holder.bindingAdapterPosition
+            if (position != binding.pager.currentItem && position != animTarget) return
             pageBy(delta)
+        }
+
+        override fun allowDoubleTapZoom(holder: PhotoPageHolder, xFraction: Float): Boolean {
+            return xFraction > SIDE_TAP_ZONE && xFraction < 1f - SIDE_TAP_ZONE
         }
     }
 
     private val pageChangeCallback = object : androidx.viewpager2.widget.ViewPager2.OnPageChangeCallback() {
         override fun onPageSelected(position: Int) {
             if (!::adapter.isInitialized) return
+            if (animTarget >= 0 && position != animTarget && pageAnimator == null) {
+                animTarget = -1
+                pageGeneration++
+            }
             val photo = photos.getOrNull(position)
             Log.d(
                 TAG,
@@ -137,12 +168,8 @@ class ViewerActivity : AppCompatActivity() {
             lastLiveVisual = null
             adapter.setActivePosition(position)
             refreshChrome()
-            binding.pager.postDelayed({
-                if (!isFinishing && ::adapter.isInitialized) {
-                    adapter.setActivePosition(binding.pager.currentItem)
-                    refreshChrome()
-                }
-            }, 100)
+            binding.pager.removeCallbacks(syncActiveRunnable)
+            binding.pager.postDelayed(syncActiveRunnable, 100)
         }
     }
 
@@ -169,8 +196,17 @@ class ViewerActivity : AppCompatActivity() {
 
         albumKey = intent.getStringExtra(EXTRA_ALBUM_KEY)
         query = intent.getStringExtra(EXTRA_QUERY)
-        savedPosition = savedInstanceState?.getInt(KEY_POSITION, -1)
-            ?: intent.getIntExtra(EXTRA_POSITION, 0)
+        externalUri = resolveExternalUri()
+        // Persistable URI grants are intentionally NOT taken: the external VIEW
+        // entry is one-shot, and a long-lived grant to a caller-controlled
+        // authority is an unnecessary privilege escalation.
+        val requestedPosition = intent.getIntExtra(EXTRA_POSITION, 0)
+        savedPosition = savedInstanceState?.getInt(KEY_POSITION, requestedPosition)
+            ?: requestedPosition
+        pendingDeleteId = savedInstanceState?.getLong(KEY_PENDING_DELETE_ID, -1L) ?: -1L
+        pendingDeletePosition = savedInstanceState?.getInt(KEY_PENDING_DELETE_POS, -1) ?: -1
+        isChromeVisible = savedInstanceState?.getBoolean(KEY_CHROME_VISIBLE, true) ?: true
+        gifControlsExpanded = savedInstanceState?.getBoolean(KEY_GIF_EXPANDED, false) ?: false
 
         binding.topChrome.alpha = 1f
         binding.bottomChrome.alpha = 1f
@@ -186,8 +222,8 @@ class ViewerActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        // The transition mode can change while this viewer sits in the back stack.
-        applyPageTransformer()
+        // Only rebuild the transformer when the mode actually changed.
+        if (lastAppliedTransition != app.prefs.transitionMode) applyPageTransformer()
         if (::adapter.isInitialized && photos.isNotEmpty()) {
             adapter.setActivePosition(binding.pager.currentItem)
             refreshChrome()
@@ -199,13 +235,47 @@ class ViewerActivity : AppCompatActivity() {
             adapter.activeHolder?.setActive(false)
         }
         gifControlsExpanded = false
+        // A cancelled fake-drag animation must release ViewPager2 before the
+        // activity goes to background, otherwise paging stays broken on resume.
+        pageAnimator?.cancel()
+        pageAnimator = null
+        endFakeDragIfNeeded()
+        animTarget = -1
+        moreMenu?.dismiss()
         super.onStop()
+    }
+
+    override fun finish() {
+        if (::adapter.isInitialized && photos.isNotEmpty()) {
+            val index = binding.pager.currentItem.coerceIn(0, photos.size - 1)
+            Log.d(TAG, "finish pos=$index id=${photos[index].id}")
+            setResult(
+                Activity.RESULT_OK,
+                Intent().apply {
+                    putExtra(EXTRA_EXIT_POSITION, index)
+                    putExtra(EXTRA_EXIT_PHOTO_ID, photos[index].id)
+                }
+            )
+        }
+        super.finish()
     }
 
     override fun onDestroy() {
         cancelChromeAutoHide()
         pageAnimator?.cancel()
         pageAnimator = null
+        moreMenu?.setOnDismissListener(null)
+        moreMenu?.dismiss()
+        moreMenu = null
+        binding.pager.removeCallbacks(syncActiveRunnable)
+        binding.pager.removeCallbacks(initialSyncRunnable)
+        verifyRunnable?.let { binding.pager.removeCallbacks(it) }
+        verifyRunnable = null
+        endFakeDragIfNeeded()
+        if (pageCallbackRegistered) {
+            binding.pager.unregisterOnPageChangeCallback(pageChangeCallback)
+            pageCallbackRegistered = false
+        }
         if (::adapter.isInitialized) {
             adapter.releaseAll()
             binding.pager.adapter = null
@@ -213,11 +283,24 @@ class ViewerActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    private fun endFakeDragIfNeeded() {
+        if (binding.pager.isFakeDragging) {
+            runCatching { binding.pager.endFakeDrag() }
+        }
+    }
+
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        if (::adapter.isInitialized) {
-            outState.putInt(KEY_POSITION, binding.pager.currentItem)
+        val position = if (::adapter.isInitialized && !isFinishing) {
+            binding.pager.currentItem
+        } else {
+            savedPosition
         }
+        outState.putInt(KEY_POSITION, position)
+        outState.putLong(KEY_PENDING_DELETE_ID, pendingDeleteId)
+        outState.putInt(KEY_PENDING_DELETE_POS, pendingDeletePosition)
+        outState.putBoolean(KEY_CHROME_VISIBLE, isChromeVisible)
+        outState.putBoolean(KEY_GIF_EXPANDED, gifControlsExpanded)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -231,61 +314,164 @@ class ViewerActivity : AppCompatActivity() {
     }
 
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
-        when (ev.actionMasked) {
-            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
-                if (isChromeVisible) scheduleChromeAutoHide()
+        // Paging taps and image gestures must not extend the chrome lifetime;
+        // only touches on the chrome itself count as activity.
+        if (isChromeVisible && ev.actionMasked != MotionEvent.ACTION_CANCEL &&
+            isInsideChrome(ev.rawX, ev.rawY)
+        ) {
+            scheduleChromeAutoHide()
         }
         return super.dispatchTouchEvent(ev)
     }
 
+    private fun isInsideChrome(x: Float, y: Float): Boolean =
+        hitTest(binding.topChrome, x, y) || hitTest(binding.bottomChrome, x, y)
+
+    private fun hitTest(view: View, x: Float, y: Float): Boolean {
+        if (view.visibility != View.VISIBLE) return false
+        val location = IntArray(2)
+        view.getLocationOnScreen(location)
+        return x >= location[0] && x <= location[0] + view.width &&
+            y >= location[1] && y <= location[1] + view.height
+    }
+
     private fun loadPhotos() {
         binding.viewerLoading.visibility = View.VISIBLE
+        val external = externalUri
+        if (external != null) {
+            lifecycleScope.launch {
+                val photo = withContext(Dispatchers.IO) { buildExternalPhoto(external) }
+                if (isFinishing || isDestroyed) return@launch
+                if (photo == null) {
+                    finish()
+                    return@launch
+                }
+                photos.clear()
+                photos.add(photo)
+                showLoadedPhotos(0)
+            }
+            return
+        }
+        // A VIEW intent without a validated external URI must never fall through
+        // to the "browse the whole library" branch.
+        if (intent?.action == Intent.ACTION_VIEW) {
+            finish()
+            return
+        }
         lifecycleScope.launch {
             val library: GalleryLibrary? = try {
                 app.gallery.load(force = false)
-            } catch (_: Throwable) {
+            } catch (e: Exception) {
+                Log.w(TAG, "gallery load failed", e)
                 null
             }
             if (isFinishing || isDestroyed) return@launch
             if (library == null || !library.hasImageAccess) {
+                if (library == null) {
+                    AppHint.show(this@ViewerActivity, R.string.scan_failed)
+                }
                 finish()
                 return@launch
             }
-            val sorted = GalleryFilters.photosFor(
-                library,
-                app.userData,
-                albumKey,
-                query,
-                app.prefs.sortMode
-            )
+            val sorted = withContext(Dispatchers.IO) {
+                GalleryFilters.photosFor(
+                    library,
+                    app.userData,
+                    albumKey,
+                    query,
+                    app.prefs.sortMode
+                )
+            }
             photos.clear()
             photos.addAll(sorted)
-            if (photos.isEmpty()) {
-                finish()
-                return@launch
-            }
             val target = if (savedPosition in photos.indices) savedPosition else 0
-            adapter = PhotoPagerAdapter(this@ViewerActivity, photos, pageCallback).apply {
-                activeIndex = target
-            }
-            binding.pager.offscreenPageLimit = 1
-            binding.pager.adapter = adapter
-            binding.pager.registerOnPageChangeCallback(pageChangeCallback)
-            binding.pager.setCurrentItem(target, false)
-            binding.viewerLoading.visibility = View.GONE
-            binding.pager.post {
-                if (isFinishing) return@post
-                adapter.setActivePosition(binding.pager.currentItem)
-                refreshChrome()
-                showChrome()
-            }
-            binding.pager.postDelayed({
-                if (!isFinishing && ::adapter.isInitialized) {
-                    adapter.setActivePosition(binding.pager.currentItem)
-                    refreshChrome()
-                }
-            }, 120)
+            showLoadedPhotos(target)
         }
+    }
+
+    private fun showLoadedPhotos(target: Int) {
+        if (isFinishing || photos.isEmpty()) {
+            finish()
+            return
+        }
+        val currentTarget = if (target in photos.indices) target else 0
+        adapter = PhotoPagerAdapter(this, photos, pageCallback).apply {
+            activeIndex = currentTarget
+        }
+        binding.pager.offscreenPageLimit = 1
+        binding.pager.adapter = adapter
+        if (!pageCallbackRegistered) {
+            binding.pager.registerOnPageChangeCallback(pageChangeCallback)
+            pageCallbackRegistered = true
+        }
+        binding.pager.setCurrentItem(currentTarget, false)
+        binding.viewerLoading.visibility = View.GONE
+        binding.pager.removeCallbacks(syncActiveRunnable)
+        binding.pager.removeCallbacks(initialSyncRunnable)
+        binding.pager.post(initialSyncRunnable)
+        binding.pager.postDelayed(syncActiveRunnable, 120)
+    }
+
+    /** Only our own non-exported ExternalViewerActivity can supply this extra. */
+    private fun resolveExternalUri(): Uri? {
+        val raw = intent.getStringExtra(EXTRA_EXTERNAL_URI) ?: return null
+        val uri = runCatching { Uri.parse(raw) }.getOrNull() ?: return null
+        if (!ContentResolver.SCHEME_CONTENT.equals(uri.scheme, ignoreCase = true)) return null
+        val mime = runCatching { contentResolver.getType(uri) }.getOrNull()
+        if (mime.isNullOrEmpty() || !mime.startsWith("image/", ignoreCase = true)) return null
+        return uri
+    }
+
+    private fun buildExternalPhoto(uri: Uri): Photo? {
+        val resolver = contentResolver
+        val mime = runCatching { resolver.getType(uri) }.getOrNull().orEmpty()
+        // No fallback to "image/*": an unknown MIME is rejected rather than assumed.
+        if (!mime.startsWith("image/", ignoreCase = true)) return null
+
+        var name = uri.lastPathSegment.orEmpty().substringAfterLast('/')
+        var size = 0L
+        runCatching {
+            resolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (nameIndex >= 0) cursor.getString(nameIndex)?.let { name = it }
+                    val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (sizeIndex >= 0) size = cursor.getLong(sizeIndex)
+                }
+            }
+        }
+
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        var readable = false
+        runCatching {
+            resolver.openInputStream(uri)?.use { input ->
+                readable = true
+                android.graphics.BitmapFactory.decodeStream(input, null, bounds)
+            }
+        }
+        if (!readable) return null
+
+        return Photo(
+            id = -1L,
+            uri = uri,
+            name = name.ifBlank { "image" },
+            mime = mime,
+            dateTakenMs = 0L,
+            dateModifiedMs = 0L,
+            sizeBytes = size.coerceAtLeast(0L),
+            width = bounds.outWidth.coerceAtLeast(0),
+            height = bounds.outHeight.coerceAtLeast(0),
+            bucketKey = "",
+            bucketName = "",
+            relativePath = "",
+            volumeName = ""
+        )
     }
 
     private fun setupListeners() {
@@ -572,7 +758,10 @@ class ViewerActivity : AppCompatActivity() {
     private fun scheduleChromeAutoHide() {
         cancelChromeAutoHide()
         val delay = app.prefs.chromeAutoHideMs
-        if (delay > 0 && isChromeVisible) binding.root.postDelayed(autoHideChrome, delay.toLong())
+        if (delay > 0 && isChromeVisible) {
+            Log.d(TAG, "chrome timer ${delay}ms")
+            binding.root.postDelayed(autoHideChrome, delay.toLong())
+        }
     }
 
     private fun cancelChromeAutoHide() {
@@ -595,6 +784,7 @@ class ViewerActivity : AppCompatActivity() {
     private fun hideChrome() {
         if (!isChromeVisible) return
         cancelChromeAutoHide()
+        Log.d(TAG, "chrome hidden")
         isChromeVisible = false
         applySystemBars(false)
         binding.topChrome.animate().cancel()
@@ -624,7 +814,8 @@ class ViewerActivity : AppCompatActivity() {
 
     private fun pageBy(delta: Int) {
         if (!::adapter.isInitialized) return
-        val current = binding.pager.currentItem
+        val inFlight = animTarget >= 0
+        val current = if (inFlight) animTarget else binding.pager.currentItem
         val target = (current + delta).coerceIn(0, photos.size - 1)
         if (target == current) {
             if (delta > 0 && photos.isNotEmpty() && current >= photos.size - 1) {
@@ -632,12 +823,19 @@ class ViewerActivity : AppCompatActivity() {
             }
             return
         }
+        if (inFlight && target == animTarget) return
         val mode = app.prefs.transitionMode
         if (mode == TransitionMode.NONE) {
+            pageAnimator?.cancel()
+            pageGeneration++
+            animTarget = -1
             binding.pager.setCurrentItem(target, false)
             return
         }
         if (kotlin.math.abs(target - current) != 1 || binding.pager.width <= 0) {
+            pageAnimator?.cancel()
+            pageGeneration++
+            animTarget = -1
             binding.pager.setCurrentItem(target, false)
             return
         }
@@ -645,20 +843,28 @@ class ViewerActivity : AppCompatActivity() {
     }
 
     private fun animatePageTo(target: Int) {
-        val direction = if (target > binding.pager.currentItem) 1 else -1
+        val inFlight = animTarget
+        val start = if (inFlight >= 0) inFlight else binding.pager.currentItem
         pageAnimator?.cancel()
-        if (binding.pager.isFakeDragging) {
-            runCatching { binding.pager.endFakeDrag() }
+        if (binding.pager.currentItem != start) {
+            // Cancel leaves the fake drag mid-way; settle instantly on the page the
+            // previous tap was heading to before starting the next leg.
+            binding.pager.setCurrentItem(start, false)
         }
+        animTarget = target
+        val generation = ++pageGeneration
         if (!binding.pager.beginFakeDrag()) {
             Log.d(TAG, "fake drag unavailable, jumping to $target")
+            animTarget = -1
             binding.pager.setCurrentItem(target, false)
             return
         }
+        val direction = if (target > start) 1 else -1
         val width = binding.pager.width.toFloat()
         val duration = app.prefs.transitionDurationMs.toLong()
-        Log.d(TAG, "page anim -> $target duration=${duration}ms")
+        Log.d(TAG, "page anim -> $target duration=${duration}ms from=$inFlight")
         var traveled = 0f
+        var cancelled = false
         val animator = ValueAnimator.ofFloat(0f, 1f).apply {
             this.duration = duration
             interpolator = DecelerateInterpolator()
@@ -672,12 +878,13 @@ class ViewerActivity : AppCompatActivity() {
         animator.addListener(object : AnimatorListenerAdapter() {
             override fun onAnimationEnd(animation: Animator) {
                 releasePageDrag()
-                verifyPage(target)
+                if (cancelled || generation != pageGeneration) return
+                verifyPage(target, generation)
             }
 
             override fun onAnimationCancel(animation: Animator) {
+                cancelled = true
                 releasePageDrag()
-                verifyPage(target)
             }
         })
         pageAnimator = animator
@@ -688,16 +895,23 @@ class ViewerActivity : AppCompatActivity() {
      * A settled fake drag can snap back to the previous page. Check only after the pager
      * has had time to settle, otherwise the correction would cut the transition short.
      */
-    private fun verifyPage(target: Int) {
+    private fun verifyPage(target: Int, generation: Int) {
         val delay = app.prefs.transitionDurationMs + 300L
-        binding.pager.postDelayed({
-            if (isFinishing || !::adapter.isInitialized) return@postDelayed
-            if (binding.pager.isFakeDragging || binding.pager.currentItem == target) return@postDelayed
+        verifyRunnable?.let { binding.pager.removeCallbacks(it) }
+        val runnable = Runnable {
+            if (isFinishing || isDestroyed || !::adapter.isInitialized) return@Runnable
+            if (generation != pageGeneration) return@Runnable
+            animTarget = -1
+            if (binding.pager.isFakeDragging || binding.pager.currentItem == target) {
+                return@Runnable
+            }
             Log.d(TAG, "page $target not reached from ${binding.pager.currentItem}, correcting")
             binding.pager.setCurrentItem(target, false)
             adapter.setActivePosition(target)
             refreshChrome()
-        }, delay)
+        }
+        verifyRunnable = runnable
+        binding.pager.postDelayed(runnable, delay)
     }
 
     private fun releasePageDrag() {
@@ -709,6 +923,7 @@ class ViewerActivity : AppCompatActivity() {
 
     private fun applyPageTransformer() {
         val mode = app.prefs.transitionMode
+        lastAppliedTransition = mode
         Log.d(TAG, "transition mode=$mode")
         if (mode == TransitionMode.FADE) {
             binding.pager.setPageTransformer { page, position ->
@@ -785,7 +1000,8 @@ class ViewerActivity : AppCompatActivity() {
         try {
             val sender = MediaStore.createDeleteRequest(contentResolver, listOf(photo.uri)).intentSender
             deleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
-        } catch (t: Throwable) {
+        } catch (e: Exception) {
+            Log.w(TAG, "createDeleteRequest failed", e)
             AppHint.show(this, getString(R.string.delete_failed))
         }
     }
@@ -963,7 +1179,9 @@ class ViewerActivity : AppCompatActivity() {
     }
 
     private fun showMoreMenu() {
+        moreMenu?.dismiss()
         val popup = PopupMenu(this, binding.moreButton)
+        moreMenu = popup
         popup.menuInflater.inflate(R.menu.menu_viewer_actions, popup.menu)
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
@@ -985,7 +1203,10 @@ class ViewerActivity : AppCompatActivity() {
             }
         }
         cancelChromeAutoHide()
-        popup.setOnDismissListener { scheduleChromeAutoHide() }
+        popup.setOnDismissListener {
+            moreMenu = null
+            scheduleChromeAutoHide()
+        }
         popup.show()
     }
 
@@ -1041,8 +1262,8 @@ class ViewerActivity : AppCompatActivity() {
         val printManager = getSystemService(PrintManager::class.java) ?: return
         try {
             printManager.print(getString(R.string.print_job), ImagePrintAdapter(this, photo), null)
-        } catch (t: Throwable) {
-            Log.w(TAG, "print failed", t)
+        } catch (e: Exception) {
+            Log.w(TAG, "print failed", e)
             AppHint.show(this, getString(R.string.print_failed))
         }
     }
@@ -1070,7 +1291,29 @@ class ViewerActivity : AppCompatActivity() {
         private const val EXTRA_POSITION = "viewer_position"
         private const val EXTRA_QUERY = "viewer_query"
         private const val EXTRA_ALBUM_NAME = "viewer_album_name"
+        const val EXTRA_EXTERNAL_URI = "viewer_external_uri"
         private const val KEY_POSITION = "viewer_position_saved"
+        private const val KEY_PENDING_DELETE_ID = "viewer_pending_delete_id"
+        private const val KEY_PENDING_DELETE_POS = "viewer_pending_delete_pos"
+        private const val KEY_CHROME_VISIBLE = "viewer_chrome_visible"
+        private const val KEY_GIF_EXPANDED = "viewer_gif_expanded"
+        const val EXTRA_EXIT_POSITION = "viewer_exit_position"
+        const val EXTRA_EXIT_PHOTO_ID = "viewer_exit_photo_id"
+
+        fun intent(
+            context: Context,
+            albumKey: String?,
+            position: Int,
+            albumName: String?,
+            query: String? = null
+        ): Intent {
+            return Intent(context, ViewerActivity::class.java).apply {
+                putExtra(EXTRA_POSITION, position)
+                if (albumKey != null) putExtra(EXTRA_ALBUM_KEY, albumKey)
+                if (albumName != null) putExtra(EXTRA_ALBUM_NAME, albumName)
+                if (query != null) putExtra(EXTRA_QUERY, query)
+            }
+        }
 
         fun start(
             context: Context,
@@ -1079,13 +1322,7 @@ class ViewerActivity : AppCompatActivity() {
             albumName: String?,
             query: String? = null
         ) {
-            val intent = Intent(context, ViewerActivity::class.java).apply {
-                putExtra(EXTRA_POSITION, position)
-                if (albumKey != null) putExtra(EXTRA_ALBUM_KEY, albumKey)
-                if (albumName != null) putExtra(EXTRA_ALBUM_NAME, albumName)
-                if (query != null) putExtra(EXTRA_QUERY, query)
-            }
-            context.startActivity(intent)
+            context.startActivity(intent(context, albumKey, position, albumName, query))
         }
     }
 }

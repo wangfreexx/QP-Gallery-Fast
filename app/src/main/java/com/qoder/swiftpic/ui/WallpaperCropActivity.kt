@@ -10,13 +10,13 @@ import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.view.View
-import android.widget.Toast
 import androidx.lifecycle.lifecycleScope
 import com.qoder.swiftpic.R
 import com.qoder.swiftpic.databinding.ActivityWallpaperCropBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.IOException
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -100,8 +100,7 @@ class WallpaperCropActivity : BaseActivity() {
             }
             binding.cropLoading.visibility = View.GONE
             if (decoded == null) {
-                Toast.makeText(this@WallpaperCropActivity, R.string.image_decode_failed, Toast.LENGTH_SHORT)
-                    .show()
+                AppHint.show(this@WallpaperCropActivity, R.string.image_decode_failed)
                 finish()
                 return@launch
             }
@@ -116,13 +115,14 @@ class WallpaperCropActivity : BaseActivity() {
     }
 
     private fun decodeScaled(uri: Uri): Bitmap? {
-        val decode = { drawableMode: Boolean ->            val source = ImageDecoder.createSource(contentResolver, uri)
+        fun decode(drawableMode: Boolean): Bitmap {
+            val source = ImageDecoder.createSource(contentResolver, uri)
             val listener = ImageDecoder.OnHeaderDecodedListener { decoder, info, _ ->
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
                 val width = info.size.width.coerceAtLeast(1)
                 val height = info.size.height.coerceAtLeast(1)
                 val dimensionScale = MAX_DIMENSION.toFloat() / max(width, height)
-                val pixelScale = sqrt(MAX_PIXELS.toDouble() / (width.toDouble() * height)).toFloat()
+                val pixelScale = sqrt(MAX_PIXELS / (width.toDouble() * height)).toFloat()
                 val scale = min(1f, min(dimensionScale, pixelScale))
                 if (scale < 1f) {
                     decoder.setTargetSize(
@@ -131,23 +131,39 @@ class WallpaperCropActivity : BaseActivity() {
                     )
                 }
             }
-            if (drawableMode) {
-                val drawable = ImageDecoder.decodeDrawable(source, listener)
-                val width = drawable.intrinsicWidth.coerceAtLeast(1)
-                val height = drawable.intrinsicHeight.coerceAtLeast(1)
-                val created = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            if (!drawableMode) return ImageDecoder.decodeBitmap(source, listener)
+            val drawable = ImageDecoder.decodeDrawable(source, listener)
+            val width = drawable.intrinsicWidth.coerceAtLeast(1)
+            val height = drawable.intrinsicHeight.coerceAtLeast(1)
+            val created = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            var drawn = false
+            return try {
                 drawable.setBounds(0, 0, width, height)
                 drawable.draw(android.graphics.Canvas(created))
+                drawn = true
                 created
-            } else {
-                ImageDecoder.decodeBitmap(source, listener)
+            } finally {
+                if (!drawn) created.recycle()
             }
         }
-        val first = runCatching { decode(false) }
-        if (first.isSuccess) return first.getOrNull()
-        val second = runCatching { decode(true) }
-        Log.w("SwiftPicWallpaper", "decode failed uri=$uri", second.exceptionOrNull() ?: first.exceptionOrNull())
-        return second.getOrNull()
+
+        return try {
+            decode(false)
+        } catch (e: OutOfMemoryError) {
+            Log.w(TAG, "decodeBitmap OOM uri=$uri", e)
+            null
+        } catch (e: Exception) {
+            Log.w(TAG, "decodeBitmap failed uri=$uri", e)
+            try {
+                decode(true)
+            } catch (e2: OutOfMemoryError) {
+                Log.w(TAG, "drawable decode OOM uri=$uri", e2)
+                null
+            } catch (e2: Exception) {
+                Log.w(TAG, "drawable decode failed uri=$uri", e2)
+                null
+            }
+        }
     }
 
     private fun updateCropBox(source: Bitmap) {
@@ -174,32 +190,78 @@ class WallpaperCropActivity : BaseActivity() {
         val crop = binding.cropOverlay.cropInBitmap(source.width, source.height)
         lifecycleScope.launch {
             val ok = withContext(Dispatchers.IO) {
-                runCatching {
-                    val output = croppedRegion(source, crop)
+                // Clamp first: never hand an out-of-bounds rect to createBitmap.
+                val clamped = clampCrop(crop, source.width, source.height)
+                if (clamped == null) {
+                    Log.w(TAG, "invalid crop $crop for ${source.width}x${source.height}")
+                    return@withContext false
+                }
+                var output: Bitmap? = null
+                try {
+                    output = croppedRegion(source, clamped)
+                    if (output == null) {
+                        // A failed crop must abort; never fall back to the full
+                        // un-cropped original image.
+                        Log.w(TAG, "crop failed, refusing to set the uncropped original")
+                        return@withContext false
+                    }
                     WallpaperManager.getInstance(this@WallpaperCropActivity).setBitmap(output)
-                    if (output !== source) output.recycle()
-                }.isSuccess
+                    true
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: IOException) {
+                    Log.w(TAG, "setBitmap failed", e)
+                    false
+                } catch (e: IllegalArgumentException) {
+                    Log.w(TAG, "setBitmap failed", e)
+                    false
+                } catch (e: SecurityException) {
+                    Log.w(TAG, "setBitmap failed", e)
+                    false
+                } catch (e: Exception) {
+                    Log.w(TAG, "applyWallpaper failed", e)
+                    false
+                } finally {
+                    // Always release the cropped bitmap (but never the source).
+                    if (output !== source) output?.recycle()
+                }
             }
             applying = false
             binding.applyButton.isEnabled = true
-            Toast.makeText(
+            AppHint.show(
                 this@WallpaperCropActivity,
-                if (ok) R.string.wallpaper_done else R.string.wallpaper_failed,
-                Toast.LENGTH_SHORT
-            ).show()
+                if (ok) R.string.wallpaper_done else R.string.wallpaper_failed
+            )
             if (ok) finish()
         }
     }
 
-    private fun croppedRegion(source: Bitmap, crop: Rect): Bitmap {
+    private fun clampCrop(crop: Rect, width: Int, height: Int): Rect? {
+        if (width <= 0 || height <= 0) return null
+        val left = crop.left.coerceIn(0, width - 1)
+        val top = crop.top.coerceIn(0, height - 1)
+        val right = crop.right.coerceIn(left + 1, width)
+        val bottom = crop.bottom.coerceIn(top + 1, height)
+        if (right <= left || bottom <= top) return null
+        return Rect(left, top, right, bottom)
+    }
+
+    /** Returns the cropped bitmap, or null on any failure (never the original). */
+    private fun croppedRegion(source: Bitmap, crop: Rect): Bitmap? {
         val isFull = crop.left == 0 && crop.top == 0 &&
             crop.width() == source.width && crop.height() == source.height
-        return if (isFull) {
-            source
-        } else {
-            runCatching {
-                Bitmap.createBitmap(source, crop.left, crop.top, crop.width(), crop.height())
-            }.getOrDefault(source)
+        if (isFull) return source
+        return try {
+            Bitmap.createBitmap(source, crop.left, crop.top, crop.width(), crop.height())
+        } catch (e: OutOfMemoryError) {
+            Log.w(TAG, "crop OOM", e)
+            null
+        } catch (e: IllegalArgumentException) {
+            Log.w(TAG, "crop out of bounds", e)
+            null
+        } catch (e: Exception) {
+            Log.w(TAG, "crop failed", e)
+            null
         }
     }
 
@@ -217,6 +279,7 @@ class WallpaperCropActivity : BaseActivity() {
     }
 
     companion object {
+        private const val TAG = "SwiftPicWallpaper"
         private const val EXTRA_URI = "wallpaper_uri"
         private const val MAX_DIMENSION = 2560
         private const val MAX_PIXELS = 12_000_000.0

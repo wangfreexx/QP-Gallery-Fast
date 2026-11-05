@@ -10,13 +10,14 @@ import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.View
 import kotlin.math.abs
-import kotlin.math.max
 import kotlin.math.min
 
 class CropOverlayView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null
 ) : View(context, attrs) {
+
+    private enum class Handle { NONE, MOVE, TL, TR, BL, BR }
 
     private val imageBox = RectF()
     private val crop = RectF()
@@ -30,6 +31,11 @@ class CropOverlayView @JvmOverloads constructor(
     private val touchSlop = 28f * density
     private val handleLength = 18f * density
     private val borderWidth = 2f * density
+
+    // Reused scratch buffers: avoid allocating an array of Triple on every DOWN.
+    private val cornerHandles = arrayOf(Handle.TL, Handle.TR, Handle.BL, Handle.BR)
+    private val cornerX = FloatArray(4)
+    private val cornerY = FloatArray(4)
 
     private val dimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0x99000000.toInt()
@@ -52,8 +58,6 @@ class CropOverlayView @JvmOverloads constructor(
         strokeCap = Paint.Cap.ROUND
     }
 
-    private enum class Handle { NONE, MOVE, TL, TR, BL, BR }
-
     fun setImageBox(left: Float, top: Float, right: Float, bottom: Float) {
         if (right - left < 2f || bottom - top < 2f) return
         imageBox.set(left, top, right, bottom)
@@ -63,6 +67,9 @@ class CropOverlayView @JvmOverloads constructor(
     }
 
     fun setAspectRatio(ratio: Float?) {
+        // Reject NaN / infinite / non-positive ratios so they can never reach the
+        // scale arithmetic below.
+        if (ratio != null && (!ratio.isFinite() || ratio <= 0f)) return
         aspect = ratio
         if (imageBox.width() <= 0f) return
         crop.set(imageBox)
@@ -91,7 +98,7 @@ class CropOverlayView @JvmOverloads constructor(
     }
 
     private fun applyAspectCentered() {
-        val ratio = aspect ?: return
+        val ratio = aspect?.takeIf { it.isFinite() && it > 0f } ?: return
         var width = imageBox.width()
         var height = width / ratio
         if (height > imageBox.height()) {
@@ -165,7 +172,15 @@ class CropOverlayView @JvmOverloads constructor(
                 return true
             }
 
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+            MotionEvent.ACTION_UP -> {
+                // Accessibility / click semantics for a completed gesture.
+                performClick()
+                active = Handle.NONE
+                parent?.requestDisallowInterceptTouchEvent(false)
+                return true
+            }
+
+            MotionEvent.ACTION_CANCEL -> {
                 active = Handle.NONE
                 parent?.requestDisallowInterceptTouchEvent(false)
                 return true
@@ -175,14 +190,18 @@ class CropOverlayView @JvmOverloads constructor(
     }
 
     private fun hitHandle(x: Float, y: Float): Handle {
-        val corners = arrayOf(
-            Triple(Handle.TL, crop.left, crop.top),
-            Triple(Handle.TR, crop.right, crop.top),
-            Triple(Handle.BL, crop.left, crop.bottom),
-            Triple(Handle.BR, crop.right, crop.bottom)
-        )
-        for ((handle, cx, cy) in corners) {
-            if (abs(x - cx) <= touchSlop && abs(y - cy) <= touchSlop) return handle
+        cornerX[0] = crop.left
+        cornerY[0] = crop.top
+        cornerX[1] = crop.right
+        cornerY[1] = crop.top
+        cornerX[2] = crop.left
+        cornerY[2] = crop.bottom
+        cornerX[3] = crop.right
+        cornerY[3] = crop.bottom
+        for (i in cornerHandles.indices) {
+            if (abs(x - cornerX[i]) <= touchSlop && abs(y - cornerY[i]) <= touchSlop) {
+                return cornerHandles[i]
+            }
         }
         return Handle.NONE
     }
@@ -203,38 +222,48 @@ class CropOverlayView @JvmOverloads constructor(
         val signX = if (handle == Handle.TR || handle == Handle.BR) 1f else -1f
         val signY = if (handle == Handle.BL || handle == Handle.BR) 1f else -1f
 
-        val maxWidth = if (signX > 0) imageBox.right - anchorX else anchorX - imageBox.left
-        val maxHeight = if (signY > 0) imageBox.bottom - anchorY else anchorY - imageBox.top
-        val ratio = aspect
+        // These can be zero at an image boundary; never let a zero/negative bound
+        // turn a scale into 0 or NaN.
+        val maxWidth = (if (signX > 0) imageBox.right - anchorX else anchorX - imageBox.left)
+            .coerceAtLeast(0f)
+        val maxHeight = (if (signY > 0) imageBox.bottom - anchorY else anchorY - imageBox.top)
+            .coerceAtLeast(0f)
+        val ratio = aspect?.takeIf { it.isFinite() && it > 0f }
 
         var width: Float
         var height: Float
         if (ratio != null) {
-            width = abs(x - anchorX).coerceAtLeast(minSize)
+            width = abs(x - anchorX)
             height = width / ratio
             val rawHeight = abs(y - anchorY)
             if (rawHeight > height) {
                 height = rawHeight
                 width = height * ratio
             }
+            // Coerce BEFORE computing scale so zero / non-finite dimensions can
+            // never leak into the scale division.
+            width = if (width.isFinite()) width.coerceAtLeast(minSize) else minSize
+            height = if (height.isFinite()) height.coerceAtLeast(minSize) else minSize
             val scale = min(1f, min(maxWidth / width, maxHeight / height))
             width *= scale
             height *= scale
             if (width < minSize || height < minSize) {
-                height = minSize.coerceAtMost(maxHeight)
+                height = minSize.coerceAtMost(maxHeight).coerceAtLeast(minSize)
                 width = height * ratio
                 if (width > maxWidth) {
-                    width = maxWidth
+                    width = maxWidth.coerceAtLeast(minSize)
                     height = width / ratio
                 }
             }
         } else {
             width = abs(x - anchorX).coerceAtLeast(minSize)
+                .coerceAtMost(maxWidth.coerceAtLeast(minSize))
             height = abs(y - anchorY).coerceAtLeast(minSize)
-            width = width.coerceAtMost(maxWidth)
-            height = height.coerceAtMost(maxHeight)
+                .coerceAtMost(maxHeight.coerceAtLeast(minSize))
         }
 
+        // Final guard: never commit a zero-sized or non-finite crop rect.
+        if (!width.isFinite() || !height.isFinite() || width <= 0f || height <= 0f) return
         val left = if (signX > 0) anchorX else anchorX - width
         val top = if (signY > 0) anchorY else anchorY - height
         crop.set(left, top, left + width, top + height)

@@ -17,6 +17,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
 
 class GalleryRepository(private val context: Context) {
 
@@ -30,34 +31,36 @@ class GalleryRepository(private val context: Context) {
     @Volatile
     private var dirty = true
 
+    /** Monotonic counter of invalidation events, including ones during an in-flight scan. */
+    private val revision = AtomicInteger(0)
+
     private val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
         override fun onChange(selfChange: Boolean, uri: Uri?) {
             dirty = true
+            revision.incrementAndGet()
         }
     }
 
     init {
-        runCatching {
-            resolver.registerContentObserver(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                true,
-                observer
-            )
-        }
-        runCatching {
-            resolver.registerContentObserver(
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                true,
-                observer
-            )
+        listOf(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        ).forEach { uri ->
+            try {
+                resolver.registerContentObserver(uri, true, observer)
+            } catch (e: Exception) {
+                Log.w(TAG, "register observer failed for $uri", e)
+            }
         }
         if (Build.VERSION.SDK_INT >= 29) {
-            runCatching {
+            try {
                 resolver.registerContentObserver(
                     MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL),
                     true,
                     observer
                 )
+            } catch (e: Exception) {
+                Log.w(TAG, "register files observer failed", e)
             }
         }
     }
@@ -68,6 +71,7 @@ class GalleryRepository(private val context: Context) {
 
     fun markDirty() {
         dirty = true
+        revision.incrementAndGet()
     }
 
     suspend fun load(force: Boolean = false): GalleryLibrary {
@@ -78,9 +82,14 @@ class GalleryRepository(private val context: Context) {
                 cached?.let { return@withLock it }
             }
             val started = System.currentTimeMillis()
+            val startRevision = revision.get()
             val library = withContext(Dispatchers.IO) { scan() }
             cached = library
-            dirty = false
+            // A change notification that arrived while scan() was running must
+            // not be swallowed by blindly resetting the flag here.
+            if (revision.get() == startRevision) {
+                dirty = false
+            }
             Log.d(TAG, "scan: ${library.photos.size} photos, ${library.albums.size} albums " +
                 "in ${System.currentTimeMillis() - started}ms")
             library
@@ -98,13 +107,13 @@ class GalleryRepository(private val context: Context) {
         var hadError = false
 
         volumes.forEach { volume ->
-            runCatching {
+            try {
                 if (canReadVideos) {
                     queryVideos(volume, videoMap)
                 }
-            }.onFailure {
+            } catch (e: Exception) {
                 hadError = true
-                Log.w(TAG, "video query failed for ${volume.name}", it)
+                Log.w(TAG, "video query failed for ${volume.name}", e)
             }
         }
 
@@ -112,11 +121,11 @@ class GalleryRepository(private val context: Context) {
 
         val photos = ArrayList<Photo>(2048)
         volumes.forEach { volume ->
-            runCatching {
+            try {
                 queryImages(volume, photos)
-            }.onFailure {
+            } catch (e: Exception) {
                 hadError = true
-                Log.w(TAG, "image query failed for ${volume.name}", it)
+                Log.w(TAG, "image query failed for ${volume.name}", e)
             }
         }
 
@@ -168,7 +177,7 @@ class GalleryRepository(private val context: Context) {
             albums = albums,
             scannedAt = System.currentTimeMillis(),
             hasImageAccess = true,
-            scanError = hadError && photos.isEmpty()
+            scanError = hadError
         )
     }
 
@@ -213,47 +222,59 @@ class GalleryRepository(private val context: Context) {
         val sortOrder = "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
 
         resolver.query(volume.uri, projection.toTypedArray(), selection, null, sortOrder)?.use { cursor ->
-            val idIdx = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
-            val nameIdx = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
-            val mimeIdx = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
-            val takenIdx = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_TAKEN)
-            val modifiedIdx = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
-            val sizeIdx = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
-            val widthIdx = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.WIDTH)
-            val heightIdx = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.HEIGHT)
-            val bucketIdIdx = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.BUCKET_ID)
-            val bucketNameIdx = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
+            // OEMs occasionally omit optional columns. Only _ID / name / mime
+            // are truly required; everything else degrades to a default instead
+            // of dropping the entire volume's photos.
+            val idIdx = cursor.getColumnIndex(MediaStore.MediaColumns._ID)
+            val nameIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+            val mimeIdx = cursor.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE)
+            if (idIdx < 0 || nameIdx < 0 || mimeIdx < 0) {
+                Log.w(TAG, "essential columns missing for ${volume.name}")
+                return@use
+            }
+            val takenIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_TAKEN)
+            val modifiedIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
+            val sizeIdx = cursor.getColumnIndex(MediaStore.MediaColumns.SIZE)
+            val widthIdx = cursor.getColumnIndex(MediaStore.MediaColumns.WIDTH)
+            val heightIdx = cursor.getColumnIndex(MediaStore.MediaColumns.HEIGHT)
+            val bucketIdIdx = cursor.getColumnIndex(MediaStore.MediaColumns.BUCKET_ID)
+            val bucketNameIdx = cursor.getColumnIndex(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
             val relIdx = if (api29) {
-                cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.RELATIVE_PATH)
+                cursor.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
             } else {
                 -1
             }
             @Suppress("DEPRECATION")
-            val dataIdx = if (api29) -1 else cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATA)
+            val dataIdx = if (api29) {
+                -1
+            } else {
+                cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+            }
 
             while (cursor.moveToNext()) {
-                val id = cursor.getLong(idIdx)
-                val name = cursor.getString(nameIdx)?.takeIf { it.isNotBlank() } ?: continue
-                val mime = cursor.getString(mimeIdx).orEmpty()
+                val id = cursor.optLong(idIdx)
+                if (id <= 0L) continue
+                val name = cursor.optString(nameIdx).takeIf { it.isNotBlank() } ?: continue
+                val mime = cursor.optString(mimeIdx)
                 if (!mime.startsWith("image/", ignoreCase = true)) continue
 
-                val taken = cursor.getLong(takenIdx)
-                val modifiedSec = cursor.getLong(modifiedIdx)
+                val taken = cursor.optLong(takenIdx)
+                val modifiedSec = cursor.optLong(modifiedIdx)
                 val modified = if (modifiedSec > 0) modifiedSec * 1000L else 0L
-                val size = cursor.getLong(sizeIdx)
-                val width = if (cursor.isNull(widthIdx)) 0 else cursor.getInt(widthIdx)
-                val height = if (cursor.isNull(heightIdx)) 0 else cursor.getInt(heightIdx)
-                val bucketId = cursor.getString(bucketIdIdx).orEmpty()
-                val bucketNameRaw = cursor.getString(bucketNameIdx)
+                val size = cursor.optLong(sizeIdx).coerceAtLeast(0L)
+                val width = cursor.optInt(widthIdx).coerceAtLeast(0)
+                val height = cursor.optInt(heightIdx).coerceAtLeast(0)
+                val bucketId = cursor.optString(bucketIdIdx)
+                val bucketNameRaw = cursor.optString(bucketNameIdx).takeIf { it.isNotBlank() }
 
                 val relativePath: String
                 val dirForPair: String
                 if (api29) {
-                    relativePath = cursor.getString(relIdx).orEmpty()
+                    relativePath = cursor.optString(relIdx)
                     dirForPair = relativePath
                 } else {
                     @Suppress("DEPRECATION")
-                    val dataPath = cursor.getString(dataIdx).orEmpty()
+                    val dataPath = cursor.optString(dataIdx)
                     val parent = if (dataPath.isNotEmpty()) File(dataPath).parent.orEmpty() else ""
                     relativePath = parent
                     dirForPair = parent
@@ -303,26 +324,31 @@ class GalleryRepository(private val context: Context) {
         val selection = mediaSelection()
         var candidates = 0
         resolver.query(collection, projection, selection, null, null)?.use { cursor ->
-            val idIdx = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
-            val nameIdx = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
-            val mimeIdx = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
-            val durationIdx = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DURATION)
-            val sizeIdx = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
-            val relIdx = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.RELATIVE_PATH)
+            val idIdx = cursor.getColumnIndex(MediaStore.MediaColumns._ID)
+            val nameIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+            val mimeIdx = cursor.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE)
+            val durationIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DURATION)
+            val sizeIdx = cursor.getColumnIndex(MediaStore.MediaColumns.SIZE)
+            val relIdx = cursor.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
+            if (idIdx < 0 || nameIdx < 0 || mimeIdx < 0 || relIdx < 0) {
+                Log.w(TAG, "video columns missing for ${volume.name}")
+                return@use
+            }
 
             while (cursor.moveToNext()) {
-                val name = cursor.getString(nameIdx)?.takeIf { it.isNotBlank() } ?: continue
-                val mime = cursor.getString(mimeIdx).orEmpty()
+                val name = cursor.optString(nameIdx).takeIf { it.isNotBlank() } ?: continue
+                val mime = cursor.optString(mimeIdx)
                 if (!mime.startsWith("video/", ignoreCase = true)) continue
-                val duration = cursor.getLong(durationIdx)
-                val size = cursor.getLong(sizeIdx)
+                val duration = cursor.optLong(durationIdx)
+                val size = cursor.optLong(sizeIdx)
                 if (size <= 0) continue
                 if (duration > MAX_LIVE_VIDEO_MS) continue
-                val rel = cursor.getString(relIdx).orEmpty()
-                val key = pairKey(volume.name, rel, name)
-                val uri = ContentUris.withAppendedId(collection, cursor.getLong(idIdx))
+                val rel = cursor.optString(relIdx)
+                val videoId = cursor.optLong(idIdx)
+                if (videoId <= 0L) continue
+                val uri = ContentUris.withAppendedId(collection, videoId)
                 candidates++
-                out.putIfAbsent(key, uri)
+                pairKeys(volume.name, rel, name).forEach { key -> out.putIfAbsent(key, uri) }
             }
         }
         Log.d(TAG, "videos[${volume.name}] candidates=$candidates map=${out.size}")
@@ -361,8 +387,39 @@ class GalleryRepository(private val context: Context) {
         return "$volume|$cleanDir|$base"
     }
 
+    /**
+     * Vendors name the paired video differently from the still. Register the
+     * common variants so IMG_001.jpg can match IMG_001.jpg.mp4, MVIMG_001.mp4
+     * or IMG_001_1.mp4, without loosening the match to arbitrary names.
+     */
+    private fun pairKeys(volume: String, dir: String, name: String): List<String> {
+        val result = LinkedHashSet<String>()
+        result.add(pairKey(volume, dir, name))
+        val cleanDir = dir.trim('/').lowercase(Locale.ROOT)
+        val lower = name.lowercase(Locale.ROOT)
+        val base = lower.substringBeforeLast('.', lower)
+        val inner = base.substringBeforeLast('.', base)
+        if (inner != base) result.add("$volume|$cleanDir|$inner")
+        listOf(base, inner).forEach { candidate ->
+            val withoutSuffix = PAIR_SUFFIX.replace(candidate, "")
+            val withoutMv = withoutSuffix.removePrefix("mv")
+            if (withoutMv.length >= 4) result.add("$volume|$cleanDir|$withoutMv")
+        }
+        return result.toList()
+    }
+
+    private fun Cursor.optString(index: Int): String =
+        if (index >= 0 && !isNull(index)) getString(index).orEmpty() else ""
+
+    private fun Cursor.optLong(index: Int): Long =
+        if (index >= 0 && !isNull(index)) getLong(index) else 0L
+
+    private fun Cursor.optInt(index: Int): Int =
+        if (index >= 0 && !isNull(index)) getInt(index) else 0
+
     private companion object {
         const val TAG = "SwiftPicRepo"
         const val MAX_LIVE_VIDEO_MS = 15_000L
+        val PAIR_SUFFIX = Regex("""[_-]\d+$""")
     }
 }

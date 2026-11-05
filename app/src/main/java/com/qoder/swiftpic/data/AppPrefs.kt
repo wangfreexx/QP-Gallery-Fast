@@ -64,15 +64,47 @@ enum class BackgroundMode {
     }
 }
 
+enum class TransparencyBackdrop {
+    BLACK,
+    CHECKER;
+
+    companion object {
+        fun fromOrdinal(value: Int): TransparencyBackdrop =
+            values().getOrElse(value) { BLACK }
+    }
+}
+
 class AppPrefs(context: Context) {
 
     private val sp = context.getSharedPreferences("swiftpic_prefs", Context.MODE_PRIVATE)
 
-    var sortMode: SortMode
-        get() = SortMode.fromOrdinal(sp.getInt(KEY_SORT, SortMode.DATE_DESC.ordinal))
-        set(value) {
-            sp.edit().putInt(KEY_SORT, value.ordinal).apply()
+    /**
+     * Enums are persisted by name so inserting a new member in the middle of an
+     * enum no longer silently shifts every existing user's setting. The old
+     * ordinal key is kept as a fallback / migration source.
+     */
+    private fun <E : Enum<E>> readEnum(
+        values: Array<E>,
+        nameKey: String,
+        ordinalKey: String,
+        default: E
+    ): E {
+        sp.getString(nameKey, null)?.let { saved ->
+            values.firstOrNull { it.name == saved }?.let { return it }
         }
+        return values.getOrElse(sp.getInt(ordinalKey, default.ordinal)) { default }
+    }
+
+    private fun writeEnum(nameKey: String, ordinalKey: String, value: Enum<*>) {
+        sp.edit()
+            .putString(nameKey, value.name)
+            .putInt(ordinalKey, value.ordinal)
+            .apply()
+    }
+
+    var sortMode: SortMode
+        get() = readEnum(SortMode.values(), KEY_SORT_NAME, KEY_SORT, SortMode.DATE_DESC)
+        set(value) = writeEnum(KEY_SORT_NAME, KEY_SORT, value)
 
     /** Day headers only make sense for the date based modes. */
     val groupPhotosByDate: Boolean
@@ -103,16 +135,12 @@ class AppPrefs(context: Context) {
         }
 
     var themeMode: ThemeMode
-        get() = ThemeMode.fromOrdinal(sp.getInt(KEY_THEME, ThemeMode.DARK.ordinal))
-        set(value) {
-            sp.edit().putInt(KEY_THEME, value.ordinal).apply()
-        }
+        get() = readEnum(ThemeMode.values(), KEY_THEME_NAME, KEY_THEME, ThemeMode.DARK)
+        set(value) = writeEnum(KEY_THEME_NAME, KEY_THEME, value)
 
     var transitionMode: TransitionMode
-        get() = TransitionMode.fromOrdinal(sp.getInt(KEY_TRANSITION, TransitionMode.NONE.ordinal))
-        set(value) {
-            sp.edit().putInt(KEY_TRANSITION, value.ordinal).apply()
-        }
+        get() = readEnum(TransitionMode.values(), KEY_TRANSITION_NAME, KEY_TRANSITION, TransitionMode.NONE)
+        set(value) = writeEnum(KEY_TRANSITION_NAME, KEY_TRANSITION, value)
 
     /** Duration of the photo page transition, 50..1500 ms. */
     var transitionDurationMs: Int
@@ -122,10 +150,8 @@ class AppPrefs(context: Context) {
         }
 
     var orientationMode: OrientationMode
-        get() = OrientationMode.fromOrdinal(sp.getInt(KEY_ORIENTATION, OrientationMode.SYSTEM.ordinal))
-        set(value) {
-            sp.edit().putInt(KEY_ORIENTATION, value.ordinal).apply()
-        }
+        get() = readEnum(OrientationMode.values(), KEY_ORIENTATION_NAME, KEY_ORIENTATION, OrientationMode.SYSTEM)
+        set(value) = writeEnum(KEY_ORIENTATION_NAME, KEY_ORIENTATION, value)
 
     var tapPaging: Boolean
         get() = sp.getBoolean(KEY_TAP_PAGING, true)
@@ -149,10 +175,8 @@ class AppPrefs(context: Context) {
         }
 
     var homeLayout: HomeLayout
-        get() = HomeLayout.fromOrdinal(sp.getInt(KEY_HOME_LAYOUT, HomeLayout.GRID.ordinal))
-        set(value) {
-            sp.edit().putInt(KEY_HOME_LAYOUT, value.ordinal).apply()
-        }
+        get() = readEnum(HomeLayout.values(), KEY_HOME_LAYOUT_NAME, KEY_HOME_LAYOUT, HomeLayout.GRID)
+        set(value) = writeEnum(KEY_HOME_LAYOUT_NAME, KEY_HOME_LAYOUT, value)
 
     /** Animation speed multiplier, 0.1x..4x. Higher is faster. */
     var animationScale: Float
@@ -162,12 +186,18 @@ class AppPrefs(context: Context) {
         }
 
     var backgroundMode: BackgroundMode
-        get() = BackgroundMode.fromOrdinal(
-            sp.getInt(KEY_BACKGROUND_MODE, BackgroundMode.WALLPAPER.ordinal)
+        get() = readEnum(BackgroundMode.values(), KEY_BACKGROUND_MODE_NAME, KEY_BACKGROUND_MODE, BackgroundMode.WALLPAPER)
+        set(value) = writeEnum(KEY_BACKGROUND_MODE_NAME, KEY_BACKGROUND_MODE, value)
+
+    /** Background behind transparent image areas in the viewer and photo grid. */
+    var transparencyBackdrop: TransparencyBackdrop
+        get() = readEnum(
+            TransparencyBackdrop.values(),
+            KEY_TRANSPARENCY_BACKDROP_NAME,
+            KEY_TRANSPARENCY_BACKDROP,
+            TransparencyBackdrop.BLACK
         )
-        set(value) {
-            sp.edit().putInt(KEY_BACKGROUND_MODE, value.ordinal).apply()
-        }
+        set(value) = writeEnum(KEY_TRANSPARENCY_BACKDROP_NAME, KEY_TRANSPARENCY_BACKDROP, value)
 
     /** Gaussian blur level for the wallpaper background, 0..40. */
     var backgroundBlur: Int
@@ -184,13 +214,13 @@ class AppPrefs(context: Context) {
         }
 
     var includePaths: Set<String>
-        get() = sp.getStringSet(KEY_INCLUDE_PATHS, emptySet()).orEmpty()
+        get() = sp.getStringSet(KEY_INCLUDE_PATHS, emptySet())?.toSet().orEmpty()
         set(value) {
             sp.edit().putStringSet(KEY_INCLUDE_PATHS, normalizePaths(value)).apply()
         }
 
     var excludePaths: Set<String>
-        get() = sp.getStringSet(KEY_EXCLUDE_PATHS, emptySet()).orEmpty()
+        get() = sp.getStringSet(KEY_EXCLUDE_PATHS, emptySet())?.toSet().orEmpty()
         set(value) {
             sp.edit().putStringSet(KEY_EXCLUDE_PATHS, normalizePaths(value)).apply()
         }
@@ -205,11 +235,14 @@ class AppPrefs(context: Context) {
         get() = sp.getLong(KEY_LAST_ALBUM_AT, 0L)
 
     fun saveLastAlbum(key: String?, name: String) {
-        sp.edit()
-            .putString(KEY_LAST_ALBUM_KEY, key ?: "")
+        val editor = sp.edit()
             .putString(KEY_LAST_ALBUM_NAME, name)
             .putLong(KEY_LAST_ALBUM_AT, System.currentTimeMillis())
-            .apply()
+        // null means "no album to restore"; writing "" would make the getter
+        // return an empty-but-non-null key.
+        if (key == null) editor.remove(KEY_LAST_ALBUM_KEY)
+        else editor.putString(KEY_LAST_ALBUM_KEY, key)
+        editor.apply()
     }
 
     fun clearLastAlbum() {
@@ -228,21 +261,29 @@ class AppPrefs(context: Context) {
 
     private companion object {
         const val KEY_SORT = "sort_mode"
+        const val KEY_SORT_NAME = "sort_mode_name"
         const val KEY_ASKED_PERMISSION = "asked_permission"
         const val KEY_LIVE_MUTED = "live_muted"
         const val KEY_LIVE_AUTOPLAY = "live_autoplay"
         const val KEY_HDR_ENABLED = "hdr_enabled"
         const val KEY_THEME = "theme_mode"
+        const val KEY_THEME_NAME = "theme_mode_name"
         const val KEY_TRANSITION = "transition_mode"
+        const val KEY_TRANSITION_NAME = "transition_mode_name"
         const val KEY_TRANSITION_DURATION = "transition_duration"
         const val KEY_ORIENTATION = "orientation_mode"
+        const val KEY_ORIENTATION_NAME = "orientation_mode_name"
         const val KEY_TAP_PAGING = "tap_paging"
         const val KEY_KEEP_SCREEN_ON = "keep_screen_on"
         const val KEY_CHROME_AUTO_HIDE = "chrome_auto_hide_ms"
         const val KEY_HOME_LAYOUT = "home_layout"
+        const val KEY_HOME_LAYOUT_NAME = "home_layout_name"
         const val KEY_ANIMATION_SCALE = "animation_scale"
         const val KEY_BACKGROUND_MODE = "background_mode"
+        const val KEY_BACKGROUND_MODE_NAME = "background_mode_name"
         const val KEY_BACKGROUND_BLUR = "background_blur"
+        const val KEY_TRANSPARENCY_BACKDROP = "transparency_backdrop"
+        const val KEY_TRANSPARENCY_BACKDROP_NAME = "transparency_backdrop_name"
         const val KEY_GRID_COLUMNS = "grid_columns"
         const val KEY_INCLUDE_PATHS = "include_paths"
         const val KEY_EXCLUDE_PATHS = "exclude_paths"

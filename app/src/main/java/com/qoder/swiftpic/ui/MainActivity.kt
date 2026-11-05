@@ -8,9 +8,9 @@ import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.Settings
 import android.text.InputType
+import android.util.Log
 import android.view.View
 import android.widget.EditText
-import android.widget.Toast
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
@@ -48,6 +48,7 @@ class MainActivity : BaseActivity() {
     private var lastUserDataVersion = -1
     private var currentDisplayedAlbumKeys: List<String> = emptyList()
     private var restoreScroll = RecyclerView.NO_POSITION
+    private var restoreScrollOffset = 0
     private var currentHomeLayout: HomeLayout = HomeLayout.GRID
 
     override val usesWallpaperBackground: Boolean = true
@@ -63,9 +64,9 @@ class MainActivity : BaseActivity() {
         if (result.resultCode == Activity.RESULT_OK) {
             app.gallery.markDirty()
             loadLibrary(force = true)
-            Toast.makeText(this, getString(R.string.delete_album_done, name), Toast.LENGTH_SHORT).show()
+            AppHint.show(this, getString(R.string.delete_album_done, name))
         } else {
-            Toast.makeText(this, R.string.delete_album_canceled, Toast.LENGTH_SHORT).show()
+            AppHint.show(this, R.string.delete_album_canceled)
         }
     }
 
@@ -88,6 +89,8 @@ class MainActivity : BaseActivity() {
 
         restoreScroll = savedInstanceState?.getInt(KEY_SCROLL, RecyclerView.NO_POSITION)
             ?: RecyclerView.NO_POSITION
+        restoreScrollOffset = savedInstanceState?.getInt(KEY_SCROLL_OFFSET, 0) ?: 0
+        pendingDeleteAlbumName = savedInstanceState?.getString(KEY_PENDING_DELETE_ALBUM).orEmpty()
 
         currentHomeLayout = app.prefs.homeLayout
         adapter = MainAdapter(
@@ -141,6 +144,10 @@ class MainActivity : BaseActivity() {
                 }
                 R.id.action_about -> {
                     showAbout()
+                    true
+                }
+                R.id.action_exit -> {
+                    finishAffinity()
                     true
                 }
                 else -> false
@@ -208,9 +215,12 @@ class MainActivity : BaseActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        val position = (binding.albums.layoutManager as? GridLayoutManager)
-            ?.findFirstVisibleItemPosition() ?: RecyclerView.NO_POSITION
+        val layout = binding.albums.layoutManager as? GridLayoutManager
+        val position = layout?.findFirstVisibleItemPosition() ?: RecyclerView.NO_POSITION
+        val offset = layout?.findViewByPosition(position)?.top ?: 0
         outState.putInt(KEY_SCROLL, position)
+        outState.putInt(KEY_SCROLL_OFFSET, offset)
+        outState.putString(KEY_PENDING_DELETE_ALBUM, pendingDeleteAlbumName)
     }
 
     private fun setupRecyclerView() {
@@ -252,11 +262,13 @@ class MainActivity : BaseActivity() {
             try {
                 val library = app.gallery.load(force)
                 loadedOnce = true
+                app.userData.migrateLegacyKeys(library.photos)
                 render(library)
-            } catch (t: Throwable) {
+            } catch (e: Exception) {
+                Log.w(TAG, "library load failed", e)
                 showEmpty(
                     getString(R.string.scan_failed),
-                    t.message ?: getString(R.string.image_load_failed)
+                    e.message ?: getString(R.string.image_load_failed)
                 )
             } finally {
                 loading = false
@@ -280,7 +292,11 @@ class MainActivity : BaseActivity() {
             GalleryFilters.favoritePhotos(visible, app.userData),
             SortMode.DATE_DESC
         )
-        binding.toolbar.subtitle = null
+        binding.toolbar.subtitle = if (MediaPermissions.isPartialAccess(this)) {
+            getString(R.string.partial_permission_message)
+        } else {
+            null
+        }
         if (library.scanError) {
             showEmpty(
                 getString(R.string.scan_failed),
@@ -336,8 +352,13 @@ class MainActivity : BaseActivity() {
 
         if (restoreScroll != RecyclerView.NO_POSITION) {
             val target = restoreScroll.coerceIn(0, (adapter.itemCount - 1).coerceAtLeast(0))
-            binding.albums.post { binding.albums.scrollToPosition(target) }
+            val offset = restoreScrollOffset
+            binding.albums.post {
+                (binding.albums.layoutManager as? GridLayoutManager)
+                    ?.scrollToPositionWithOffset(target, offset)
+            }
             restoreScroll = RecyclerView.NO_POSITION
+            restoreScrollOffset = 0
         }
     }
 
@@ -351,28 +372,30 @@ class MainActivity : BaseActivity() {
             AlbumSortMode.MANUAL -> {
                 val byKey = albums.associateBy { it.key }
                 val ordered = ArrayList<Album>(albums.size)
-                app.userData.albumOrder().forEach { key ->
-                    byKey[key]?.let { album ->
-                        if (ordered.none { it.key == album.key }) ordered.add(album)
-                    }
+                val seen = HashSet<String>(albums.size)
+                fun addIfNew(album: Album?) {
+                    if (album != null && seen.add(album.key)) ordered.add(album)
                 }
-                albums.forEach { album ->
-                    if (ordered.none { it.key == album.key }) ordered.add(album)
-                }
+                app.userData.albumOrder().forEach { key -> addIfNew(byKey[key]) }
+                albums.forEach { album -> addIfNew(album) }
                 ordered
             }
         }
+        val sortedByKey = sorted.associateBy { it.key }
         val pinnedOrder = app.userData.pinnedKeys()
         val pinned = ArrayList<Album>(pinnedOrder.size)
+        val pinnedKeys = HashSet<String>(pinnedOrder.size)
         pinnedOrder.forEach { key ->
-            sorted.firstOrNull { it.key == key }?.let { pinned.add(it) }
+            sortedByKey[key]?.let { album ->
+                if (pinnedKeys.add(key)) pinned.add(album)
+            }
         }
         sorted.forEach { album ->
-            if (app.userData.isPinned(album.key) && pinned.none { it.key == album.key }) {
+            if (app.userData.isPinned(album.key) && pinnedKeys.add(album.key)) {
                 pinned.add(album)
             }
         }
-        val normal = sorted.filterNot { app.userData.isPinned(it.key) }
+        val normal = sorted.filterNot { pinnedKeys.contains(it.key) }
         return pinned + normal
     }
 
@@ -427,7 +450,7 @@ class MainActivity : BaseActivity() {
                     .map { it.trim() }
                     .filter { it.isNotEmpty() }
                 app.userData.setAlbumTags(album.key, tags)
-                Toast.makeText(this, R.string.tag_saved, Toast.LENGTH_SHORT).show()
+                AppHint.show(this, R.string.tag_saved)
                 renderCached()
             }
             .setNegativeButton(R.string.cancel, null)
@@ -437,22 +460,18 @@ class MainActivity : BaseActivity() {
     private fun excludeAlbum(album: Album) {
         val path = album.photos.firstOrNull()?.relativePath?.trim('/').orEmpty()
         if (path.isEmpty()) {
-            Toast.makeText(this, R.string.exclude_album_root, Toast.LENGTH_SHORT).show()
+            AppHint.show(this, R.string.exclude_album_root)
             return
         }
         app.prefs.excludePaths = app.prefs.excludePaths + path
         app.gallery.markDirty()
-        Toast.makeText(
-            this,
-            getString(R.string.exclude_album_done, album.name, path),
-            Toast.LENGTH_LONG
-        ).show()
+        AppHint.show(this, getString(R.string.exclude_album_done, album.name, path))
         loadLibrary(force = true)
     }
 
     private fun confirmDeleteAlbum(album: Album) {
         if (album.photos.isEmpty()) {
-            Toast.makeText(this, R.string.delete_album_empty, Toast.LENGTH_SHORT).show()
+            AppHint.show(this, R.string.delete_album_empty)
             return
         }
         MaterialAlertDialogBuilder(this)
@@ -483,32 +502,32 @@ class MainActivity : BaseActivity() {
             try {
                 val request = MediaStore.createDeleteRequest(contentResolver, uris)
                 deleteAlbumLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
-            } catch (t: Throwable) {
+            } catch (e: Exception) {
+                Log.w(TAG, "createDeleteRequest failed", e)
                 pendingDeleteAlbumName = ""
-                Toast.makeText(this, R.string.delete_failed, Toast.LENGTH_SHORT).show()
+                AppHint.show(this, R.string.delete_failed)
             }
             return
         }
         // Android 10 and below have no batch consent dialog; delete directly with storage rights.
-        Toast.makeText(this, R.string.processing, Toast.LENGTH_SHORT).show()
+        AppHint.show(this, R.string.processing)
         lifecycleScope.launch {
             val deleted = withContext(Dispatchers.IO) {
                 var count = 0
                 uris.forEach { uri ->
-                    val ok = runCatching { contentResolver.delete(uri, null, null) > 0 }
-                        .getOrDefault(false)
+                    val ok = try {
+                        contentResolver.delete(uri, null, null) > 0
+                    } catch (e: Exception) {
+                        Log.w(TAG, "delete failed for $uri", e)
+                        false
+                    }
                     if (ok) count++
                 }
                 count
             }
             app.gallery.markDirty()
             loadLibrary(force = true)
-            Toast.makeText(
-                this@MainActivity,
-                if (deleted > 0) getString(R.string.delete_album_done_count, album.name, deleted)
-                else getString(R.string.delete_album_done, album.name),
-                Toast.LENGTH_SHORT
-            ).show()
+            AppHint.show(this@MainActivity, if (deleted > 0) getString(R.string.delete_album_done_count, album.name, deleted) else getString(R.string.delete_album_done, album.name))
         }
     }
 
@@ -563,6 +582,12 @@ class MainActivity : BaseActivity() {
     }
 
     private fun requestOrSettings() {
+        // Limited access still returns canReadImages() == true, so check the
+        // partial state separately and let the user re-open the photo picker.
+        if (MediaPermissions.isPartialAccess(this)) {
+            permissionLauncher.launch(MediaPermissions.requestPermissions())
+            return
+        }
         if (!MediaPermissions.canReadImages(this) &&
             app.prefs.askedPermission &&
             MediaPermissions.shouldOpenSettings(this, true)
@@ -579,7 +604,11 @@ class MainActivity : BaseActivity() {
             Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
             Uri.parse("package:$packageName")
         )
-        runCatching { startActivity(intent) }
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.w(TAG, "open settings failed", e)
+        }
     }
 
     private fun openAlbum(key: String?, name: String) {
@@ -587,9 +616,12 @@ class MainActivity : BaseActivity() {
     }
 
     private fun showAbout() {
-        val version = runCatching {
+        val version = try {
             packageManager.getPackageInfo(packageName, 0).versionName
-        }.getOrNull() ?: "1.0.0"
+        } catch (e: Exception) {
+            Log.w(TAG, "package info unavailable", e)
+            null
+        } ?: "1.0.0"
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.about)
             .setMessage(getString(R.string.about_message, version))
@@ -598,7 +630,10 @@ class MainActivity : BaseActivity() {
     }
 
     private companion object {
+        const val TAG = "SwiftPicMain"
         const val KEY_SCROLL = "main_scroll"
+        const val KEY_SCROLL_OFFSET = "main_scroll_offset"
+        const val KEY_PENDING_DELETE_ALBUM = "main_pending_delete_album"
         const val SESSION_RESTORE_WINDOW_MS = 12 * 60 * 60 * 1000L
     }
 }

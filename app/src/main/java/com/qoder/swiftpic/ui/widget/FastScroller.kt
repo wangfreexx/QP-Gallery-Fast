@@ -26,11 +26,14 @@ class FastScroller @JvmOverloads constructor(
 ) : View(context, attrs) {
 
     private var recycler: RecyclerView? = null
+    // 记录「注册过 observer 的那个 adapter」：adapter 被替换后仍能精确注销。
+    private var observedAdapter: RecyclerView.Adapter<*>? = null
     private var dragging = false
     private var thumbTop = 0f
     private var thumbHeight = 0f
     private var dragFraction = 0f
     private var lastSeekPosition = RecyclerView.NO_POSITION
+    private var activePointerId = MotionEvent.INVALID_POINTER_ID
 
     private val density = resources.displayMetrics.density
     private val thumbVisualWidth = 18f * density
@@ -46,6 +49,7 @@ class FastScroller @JvmOverloads constructor(
     private val rect = RectF()
 
     private val hideRunnable = Runnable { if (!dragging) fadeOut() }
+    private val updateThumbRunnable = Runnable { if (!updateThumb()) hideNow() }
 
     private val scrollListener = object : RecyclerView.OnScrollListener() {
         override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
@@ -65,19 +69,54 @@ class FastScroller @JvmOverloads constructor(
     }
 
     private val dataObserver = object : RecyclerView.AdapterDataObserver() {
-        override fun onChanged() {
-            post {
-                if (!updateThumb()) hideNow()
-            }
+        override fun onChanged() = scheduleThumbUpdate()
+        override fun onItemRangeInserted(positionStart: Int, itemCount: Int) = scheduleThumbUpdate()
+        override fun onItemRangeRemoved(positionStart: Int, itemCount: Int) = scheduleThumbUpdate()
+        override fun onItemRangeMoved(fromPosition: Int, toPosition: Int, itemCount: Int) =
+            scheduleThumbUpdate()
+        override fun onItemRangeChanged(positionStart: Int, itemCount: Int) = scheduleThumbUpdate()
+        override fun onItemRangeChanged(positionStart: Int, itemCount: Int, payload: Any?) =
+            scheduleThumbUpdate()
+
+        private fun scheduleThumbUpdate() {
+            removeCallbacks(updateThumbRunnable)
+            post(updateThumbRunnable)
         }
     }
 
     fun attachTo(recyclerView: RecyclerView) {
-        recycler?.removeOnScrollListener(scrollListener)
-        recycler?.adapter?.unregisterAdapterDataObserver(dataObserver)
+        // 重新绑定前先干净地断开旧的监听，避免重复注册/泄漏。
+        detach()
         recycler = recyclerView
         recyclerView.addOnScrollListener(scrollListener)
-        recyclerView.adapter?.registerAdapterDataObserver(dataObserver)
+        val adapter = recyclerView.adapter
+        if (adapter != null) {
+            adapter.registerAdapterDataObserver(dataObserver)
+            observedAdapter = adapter
+        }
+        visibility = GONE
+    }
+
+    /** 解注册所有监听并复位拖拽状态；attachTo 与 onDetachedFromWindow 都会调用。 */
+    fun detach() {
+        recycler?.removeOnScrollListener(scrollListener)
+        val adapter = observedAdapter
+        if (adapter != null) {
+            try {
+                adapter.unregisterAdapterDataObserver(dataObserver)
+            } catch (e: Exception) {
+                Log.w(TAG, "unregister data observer failed", e)
+            }
+        }
+        observedAdapter = null
+        recycler = null
+        removeCallbacks(hideRunnable)
+        removeCallbacks(updateThumbRunnable)
+        animate().cancel()
+        dragging = false
+        activePointerId = MotionEvent.INVALID_POINTER_ID
+        lastSeekPosition = RecyclerView.NO_POSITION
+        dragFraction = 0f
         visibility = GONE
     }
 
@@ -153,18 +192,39 @@ class FastScroller @JvmOverloads constructor(
                 // Only the outer strip is a grab handle so the grid stays tappable.
                 if (event.x < width - thumbVisualWidth - edgeMargin) return false
                 dragging = true
+                activePointerId = event.getPointerId(event.actionIndex)
                 lastSeekPosition = RecyclerView.NO_POSITION
                 removeCallbacks(hideRunnable)
                 parent?.requestDisallowInterceptTouchEvent(true)
                 seekTo(event.y)
                 return true
             }
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                // 第二根手指不改变主指针，拖动仍跟随第一根手指。
+                return true
+            }
             MotionEvent.ACTION_MOVE -> {
-                if (dragging) seekTo(event.y)
+                if (dragging) {
+                    val index = event.findPointerIndex(activePointerId)
+                    seekTo(if (index >= 0) event.getY(index) else event.y)
+                }
+                return true
+            }
+            MotionEvent.ACTION_POINTER_UP -> {
+                if (dragging && event.getPointerId(event.actionIndex) == activePointerId) {
+                    // 主指针抬起：切到剩下的那根指针，避免 seek 位置突跳。
+                    val nextIndex = if (event.actionIndex == 0) 1 else 0
+                    if (nextIndex < event.pointerCount) {
+                        activePointerId = event.getPointerId(nextIndex)
+                        lastSeekPosition = RecyclerView.NO_POSITION
+                        seekTo(event.getY(nextIndex))
+                    }
+                }
                 return true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 dragging = false
+                activePointerId = MotionEvent.INVALID_POINTER_ID
                 parent?.requestDisallowInterceptTouchEvent(false)
                 scheduleHide()
                 return true
@@ -210,7 +270,7 @@ class FastScroller @JvmOverloads constructor(
     }
 
     override fun onDetachedFromWindow() {
-        removeCallbacks(hideRunnable)
+        detach()
         super.onDetachedFromWindow()
     }
 

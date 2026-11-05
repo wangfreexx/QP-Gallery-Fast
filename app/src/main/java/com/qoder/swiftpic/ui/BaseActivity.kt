@@ -27,6 +27,7 @@ open class BaseActivity : AppCompatActivity() {
     private var appliedBackgroundKey: String? = null
     private var wallpaperImage: ImageView? = null
     private var wallpaperScrim: View? = null
+    private var activityRoot: View? = null
 
     protected open val usesWallpaperBackground: Boolean = false
 
@@ -69,40 +70,44 @@ open class BaseActivity : AppCompatActivity() {
         }
         val container = content as? ViewGroup ?: return
         if (container.childCount == 0) return
-        val activityRoot = container.getChildAt(0)
-        val image = ImageView(this).apply {
+        // addView 之后 childAt(0) 会变成壁纸层，内容根必须记在字段里复用。
+        val root = resolveActivityRoot(container) ?: return
+
+        val lp = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        val existingImage = container.findViewWithTag(TAG_WALLPAPER_IMAGE) as? ImageView
+        val existingScrim = container.findViewWithTag<View>(TAG_WALLPAPER_SCRIM)
+        val image = existingImage ?: ImageView(this).apply {
+            tag = TAG_WALLPAPER_IMAGE
             scaleType = ImageView.ScaleType.CENTER_CROP
             contentDescription = null
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
-        val scrim = View(this).apply {
+        val scrim = existingScrim ?: View(this).apply {
+            tag = TAG_WALLPAPER_SCRIM
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            setBackgroundColor(if (isDarkUi(prefs)) 0x59000000 else 0x66FFFFFF)
         }
-        container.addView(
-            image,
-            0,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        )
-        container.addView(
-            scrim,
-            1,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        )
-        activityRoot.setBackgroundColor(Color.TRANSPARENT)
+        if (existingImage == null) container.addView(image, 0, lp)
+        if (existingScrim == null) {
+            container.addView(scrim, container.indexOfChild(image) + 1, lp)
+        }
+
+        // 已存在时不再 addView，只更新内容（遮罩色、透明背景、模糊、壁纸位图）。
+        scrim.setBackgroundColor(if (isDarkUi(prefs)) 0x59000000 else 0x66FFFFFF)
+        root.setBackgroundColor(Color.TRANSPARENT)
         wallpaperImage = image
         wallpaperScrim = scrim
 
-        if (Build.VERSION.SDK_INT >= 31 && prefs.backgroundBlur > 0) {
-            val radius = prefs.backgroundBlur * resources.displayMetrics.density * 0.7f
+        if (Build.VERSION.SDK_INT >= 31) {
             image.setRenderEffect(
-                RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.CLAMP)
+                if (prefs.backgroundBlur > 0) {
+                    val radius = prefs.backgroundBlur * resources.displayMetrics.density * 0.7f
+                    RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.CLAMP)
+                } else {
+                    null
+                }
             )
         }
 
@@ -121,6 +126,19 @@ open class BaseActivity : AppCompatActivity() {
         }
     }
 
+    private fun resolveActivityRoot(container: ViewGroup): View? {
+        val recorded = activityRoot
+        if (recorded != null && container.indexOfChild(recorded) >= 0) return recorded
+        for (i in 0 until container.childCount) {
+            val child = container.getChildAt(i)
+            if (child.tag != TAG_WALLPAPER_IMAGE && child.tag != TAG_WALLPAPER_SCRIM) {
+                activityRoot = child
+                return child
+            }
+        }
+        return null
+    }
+
     private fun animateContentEnter(content: View, prefs: AppPrefs) {
         Log.d(
             "SwiftPicAnim",
@@ -136,5 +154,10 @@ open class BaseActivity : AppCompatActivity() {
         ThemeMode.SYSTEM ->
             (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
                 Configuration.UI_MODE_NIGHT_YES
+    }
+
+    private companion object {
+        const val TAG_WALLPAPER_IMAGE = "swiftpic_wallpaper_image"
+        const val TAG_WALLPAPER_SCRIM = "swiftpic_wallpaper_scrim"
     }
 }

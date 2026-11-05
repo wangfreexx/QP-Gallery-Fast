@@ -23,6 +23,8 @@ class PhotoPagerAdapter(
     private var list: RecyclerView? = null
 
     private fun holderAt(position: Int): PhotoPageHolder? {
+        // NO_POSITION 的 holder 不能作为激活态候选，否则激活状态会串到别的页。
+        if (position == RecyclerView.NO_POSITION || position < 0) return null
         val cached = holders.firstOrNull { it.bindingAdapterPosition == position }
         if (cached != null) return cached
         return list?.findViewHolderForAdapterPosition(position) as? PhotoPageHolder
@@ -35,6 +37,7 @@ class PhotoPagerAdapter(
 
     override fun onDetachedFromRecyclerView(recyclerView: RecyclerView) {
         if (list === recyclerView) list = null
+        releaseAll()
         super.onDetachedFromRecyclerView(recyclerView)
     }
 
@@ -46,26 +49,27 @@ class PhotoPagerAdapter(
             parent,
             false
         )
-        val holder = PhotoPageHolder(binding, activity, callback)
-        holders.add(holder)
-        return holder
+        return PhotoPageHolder(binding, activity, callback)
     }
 
     override fun onBindViewHolder(holder: PhotoPageHolder, position: Int) {
-        // A ViewHolder can come back from the recycled pool; re-register it so
-        // active-page switching and releaseAll still see it.
-        holders.add(holder)
         holder.bind(photos[position], position, position == activeIndex)
     }
 
     override fun onViewAttachedToWindow(holder: PhotoPageHolder) {
         super.onViewAttachedToWindow(holder)
         holders.add(holder)
-        holder.setActive(holderAt(holder.bindingAdapterPosition) === holder)
+        val position = holder.bindingAdapterPosition
+        holder.setActive(
+            position != RecyclerView.NO_POSITION &&
+                position == activeIndex &&
+                holderAt(position) === holder
+        )
     }
 
     override fun onViewDetachedFromWindow(holder: PhotoPageHolder) {
         holder.setActive(false)
+        holders.remove(holder)
         super.onViewDetachedFromWindow(holder)
     }
 
@@ -87,7 +91,19 @@ class PhotoPagerAdapter(
     fun removeAt(index: Int) {
         if (index !in photos.indices) return
         photos.removeAt(index)
+        val newCount = photos.size
+        activeIndex = when {
+            newCount == 0 -> 0
+            activeIndex > index -> activeIndex - 1
+            activeIndex >= newCount -> newCount - 1
+            else -> activeIndex
+        }
         notifyItemRemoved(index)
+        // 让删除点之后的 holder 重新绑定，修正它们的 bindingAdapterPosition，
+        // 避免 activeHolder 落到错位的页上。
+        if (index < newCount) {
+            notifyItemRangeChanged(index, newCount - index)
+        }
     }
 
     fun releaseAll() {

@@ -1,12 +1,12 @@
 package com.qoder.swiftpic.ui.viewer
 
+import com.qoder.swiftpic.ui.AppHint
 import android.graphics.Bitmap
 import android.graphics.drawable.AnimatedImageDrawable
 import android.graphics.drawable.Drawable
 import android.view.View
 import android.view.HapticFeedbackConstants
 import android.util.Log
-import android.widget.Toast
 import androidx.recyclerview.widget.RecyclerView
 import com.qoder.swiftpic.R
 import com.qoder.swiftpic.data.DecodeSpec
@@ -19,13 +19,13 @@ import com.qoder.swiftpic.data.MotionPart
 import com.qoder.swiftpic.data.Photo
 import com.qoder.swiftpic.databinding.ViewPhotoPageBinding
 import com.qoder.swiftpic.swiftPic
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class PhotoPageHolder(
     private val binding: ViewPhotoPageBinding,
@@ -36,6 +36,8 @@ class PhotoPageHolder(
     interface Callback {
         fun onPageState(holder: PhotoPageHolder)
         fun onTap(holder: PhotoPageHolder, xFraction: Float, yFraction: Float)
+
+        fun allowDoubleTapZoom(holder: PhotoPageHolder, xFraction: Float): Boolean
         fun onPageRequest(holder: PhotoPageHolder, delta: Int)
     }
 
@@ -120,6 +122,9 @@ class PhotoPageHolder(
             val width = binding.zoomImage.width.coerceAtLeast(1)
             val height = binding.zoomImage.height.coerceAtLeast(1)
             callback.onTap(this, x / width, y / height)
+        }
+        binding.zoomImage.doubleTapAllowed = { fraction ->
+            callback.allowDoubleTapZoom(this, fraction)
         }
         binding.zoomImage.onLongPressStart = {
             if (uiState.liveAvailable && !released) {
@@ -301,8 +306,10 @@ class PhotoPageHolder(
         releaseLiveController()
         teardownMedia()
         binding.zoomImage.onTap = null
+        binding.zoomImage.doubleTapAllowed = null
         binding.zoomImage.onLongPressStart = null
         binding.zoomImage.onLongPressEnd = null
+        binding.zoomImage.onEdgePage = null
         binding.zoomImage.onZoomChanged = null
         binding.zoomBadge.removeCallbacks(hideZoomBadge)
         binding.zoomImage.contentDescription = null
@@ -356,8 +363,11 @@ class PhotoPageHolder(
                     }
                 }
                 emitState()
-            } catch (t: Throwable) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
                 if (released) return@launch
+                Log.w("SwiftPicPage", "decode failed name=${photo.name}", e)
                 binding.pageProgress.visibility = View.GONE
                 uiState = uiState.copy(loading = false, failed = true)
                 showError(activity.getString(R.string.image_decode_failed))
@@ -370,7 +380,10 @@ class PhotoPageHolder(
         imageJob = scope.launch {
             val source = try {
                 GifSource.load(activity, photo.uri)
-            } catch (_: Throwable) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("SwiftPicPage", "gif load failed name=${photo.name}", e)
                 null
             }
             if (released) return@launch
@@ -484,6 +497,10 @@ class PhotoPageHolder(
         if (uiState.gifPlaying) uiState = uiState.copy(gifPlaying = false)
         livePendingPlay = false
         livePendingHold = false
+        liveProbeJob?.cancel()
+        liveProbeJob = null
+        livePart = null
+        liveProbeAttempted = false
         liveJob?.cancel()
         liveJob = null
         releaseLiveController()
@@ -503,14 +520,23 @@ class PhotoPageHolder(
         liveProbeJob = scope.launch {
             val result = try {
                 app.motion.probe(photo)
-            } catch (_: Throwable) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("SwiftPicPage", "live probe failed name=${photo.name}", e)
                 null
             }
             if (released) return@launch
             val part = result?.part ?: return@launch
             livePart = part
             if (isActive) updateState(uiState.copy(liveAvailable = true))
-            runCatching { app.motion.extract(photo, part) }
+            try {
+                app.motion.extract(photo, part)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("SwiftPicPage", "live warm extract failed name=${photo.name}", e)
+            }
             if (released) return@launch
             Log.d("SwiftPicPage", "live warmed name=${photo.name} bytes=${part.length}")
             maybeAutoPlayLive()
@@ -548,7 +574,7 @@ class PhotoPageHolder(
 
         when {
             photo.hasLivePair -> preparePairLive()
-            livePart != null -> extractAndPrepareLive(livePart!!)
+            livePart != null -> livePart?.let { extractAndPrepareLive(it) }
             photo.canContainMotionPhoto -> probeThenPlay()
             else -> failLive(activity.getString(R.string.live_unavailable))
         }
@@ -563,7 +589,10 @@ class PhotoPageHolder(
             if (released || !isActive) return@launch
             val part = livePart ?: try {
                 app.motion.probe(photo).part
-            } catch (_: Throwable) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("SwiftPicPage", "live probe (play) failed name=${photo.name}", e)
                 null
             }
             if (part == null) {
@@ -589,13 +618,15 @@ class PhotoPageHolder(
         liveJob?.cancel()
         liveJob = scope.launch {
             try {
-                val file = withContext(Dispatchers.IO) {
-                    app.motion.extract(photo, part)
-                }
+                // extract 内部已切 IO，无需再包一层 withContext。
+                val file = app.motion.extract(photo, part)
                 if (released || !isActive) return@launch
                 val controller = ensureLiveController()
                 controller.prepare(LiveSource.Extracted(file))
-            } catch (t: Throwable) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("SwiftPicPage", "live extract failed name=${photo.name}", e)
                 if (!released) failLive(activity.getString(R.string.live_failed))
             }
         }
@@ -653,7 +684,7 @@ class PhotoPageHolder(
         livePendingPlay = false
         livePendingHold = false
         uiState = uiState.copy(liveBusy = false, livePlaying = false)
-        Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
+        AppHint.show(activity, message)
         emitState()
     }
 
@@ -690,6 +721,7 @@ class PhotoPageHolder(
         liveJob?.cancel()
         liveProbeJob = null
         liveJob = null
+        livePart = null
         releaseLiveController()
         binding.liveTexture.visibility = View.GONE
         binding.pageProgress.visibility = View.GONE

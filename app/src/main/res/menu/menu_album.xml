@@ -20,4 +20,36 @@
         android:id="@+id/action_settings"
         android:title="@string/settings"
         app:showAsAction="never" />
+    <item
+        android:id="@+id/action_sel_share"
+        android:title="@string/share"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_sel_delete"
+        android:title="@string/delete"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_sel_favorite"
+        android:title="@string/favorite"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_sel_move"
+        android:title="@string/move"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_sel_copy"
+        android:title="@string/copy"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_sel_tags"
+        android:title="@string/tags"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_sel_cover"
+        android:title="@string/set_cover"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_sel_clear_cover"
+        android:title="@string/clear_cover"
+        app:showAsAction="never" />
 </menu>

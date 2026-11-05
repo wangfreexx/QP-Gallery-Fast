@@ -6,10 +6,10 @@ import android.graphics.SurfaceTexture
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.os.Build
+import android.util.Log
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
-import android.util.Log
 import com.qoder.swiftpic.data.LiveSource
 import kotlin.math.min
 
@@ -44,6 +44,15 @@ class LivePhotoController(
         textureView.surfaceTextureListener = this
     }
 
+    /** MediaPlayer calls are state-sensitive; log failures instead of swallowing Errors. */
+    private inline fun safe(block: () -> Unit) {
+        try {
+            block()
+        } catch (e: Exception) {
+            Log.w(TAG, "MediaPlayer op failed", e)
+        }
+    }
+
     fun prepare(source: LiveSource) {
         if (released) return
         releasePlayer()
@@ -69,7 +78,7 @@ class LivePhotoController(
                 videoWidth = it.videoWidth
                 videoHeight = it.videoHeight
                 Log.d(TAG, "prepared ${videoWidth}x$videoHeight")
-                it.setVolume(volume(), volume())
+                applyVolume()
                 applyTransform()
                 callbacks.onReady()
                 maybeStart()
@@ -93,10 +102,11 @@ class LivePhotoController(
             }
             if (surface != null) mp.setSurface(surface)
             mp.prepareAsync()
-        } catch (t: Throwable) {
+        } catch (e: Exception) {
+            Log.w(TAG, "prepare failed", e)
             prepared = false
             releasePlayer()
-            callbacks.onError(t)
+            callbacks.onError(e)
         }
     }
 
@@ -117,17 +127,26 @@ class LivePhotoController(
         pendingHold = false
         val mp = player
         if (mp != null) {
-            runCatching { if (mp.isPlaying) mp.pause() }
-            runCatching { mp.seekTo(0) }
+            safe { if (mp.isPlaying) mp.pause() }
+            safe { mp.seekTo(0) }
         }
         textureView.visibility = View.GONE
         callbacks.onPlayingChanged(false)
     }
 
     fun setMuted(muted: Boolean) {
+        // Cache the state; it is applied on the next prepare if the player is not
+        // in a Prepared/Started/Paused/PlaybackCompleted state yet.
         this.muted = muted
         Log.d(TAG, "muted=$muted")
-        player?.let { it.setVolume(volume(), volume()) }
+        applyVolume()
+    }
+
+    /** setVolume is only legal in prepared states; guard against Idle/Initialized. */
+    private fun applyVolume() {
+        val mp = player ?: return
+        if (released || !prepared) return
+        safe { mp.setVolume(volume(), volume()) }
     }
 
     fun release() {
@@ -147,13 +166,14 @@ class LivePhotoController(
         Log.d(TAG, "start loop=$pendingHold")
         try {
             mp.isLooping = pendingHold
-            mp.setVolume(volume(), volume())
+            applyVolume()
             mp.start()
             textureView.visibility = View.VISIBLE
             applyTransform()
             callbacks.onPlayingChanged(true)
-        } catch (t: Throwable) {
-            callbacks.onError(t)
+        } catch (e: Exception) {
+            Log.w(TAG, "start failed", e)
+            callbacks.onError(e)
         }
     }
 
@@ -162,7 +182,7 @@ class LivePhotoController(
         if (surface == null) {
             surface = Surface(texture)
         }
-        runCatching { player?.setSurface(surface) }
+        safe { player?.setSurface(surface) }
         applyTransform()
         maybeStart()
     }
@@ -173,10 +193,10 @@ class LivePhotoController(
         player = null
         prepared = false
         if (mp != null) {
-            runCatching { mp.setSurface(null) }
-            runCatching { if (mp.isPlaying) mp.stop() }
-            runCatching { mp.reset() }
-            runCatching { mp.release() }
+            safe { mp.setSurface(null) }
+            safe { if (mp.isPlaying) mp.stop() }
+            safe { mp.reset() }
+            safe { mp.release() }
         }
         surface?.release()
         surface = null
@@ -213,8 +233,8 @@ class LivePhotoController(
 
     override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
         player?.let {
-            runCatching { if (it.isPlaying) it.pause() }
-            runCatching { it.setSurface(null) }
+            safe { if (it.isPlaying) it.pause() }
+            safe { it.setSurface(null) }
         }
         surface?.release()
         surface = null

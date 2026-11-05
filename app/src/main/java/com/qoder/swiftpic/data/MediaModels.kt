@@ -53,7 +53,16 @@ data class Photo(
     val baseName: String
         get() = name.substringBeforeLast('.', name).lowercase()
 
+    /**
+     * Identity of the media row. Using the MediaStore _ID (instead of its path)
+     * keeps favorites/tags/covers attached when a photo is moved or renamed.
+     * Externally opened images have no row id, so they fall back to their URI.
+     */
     val stableKey: String
+        get() = if (id > 0L) "$volumeName|$id" else "uri|$uri"
+
+    /** Pre-v1.9.1 key, used only by the one-time migration in UserDataStore. */
+    val legacyStableKey: String
         get() = "$volumeName|${relativePath.trim('/')}|$name"
 }
 
