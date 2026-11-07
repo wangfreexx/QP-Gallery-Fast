@@ -69,12 +69,14 @@ data class Photo(
 data class Album(
     val key: String,
     val name: String,
-    val photos: List<Photo>
+    val photos: List<Photo>,
+    /** Used by the cold-start snapshot, which only keeps cover thumbnails. */
+    val countOverride: Int = -1
 ) {
     val cover: Photo?
         get() = photos.firstOrNull()
     val count: Int
-        get() = photos.size
+        get() = if (countOverride >= 0) countOverride else photos.size
     val latestTime: Long
         get() = photos.firstOrNull()?.sortTimeMs ?: 0L
 }

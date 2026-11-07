@@ -22,6 +22,8 @@ import com.qoder.swiftpic.data.Album
 import com.qoder.swiftpic.data.AlbumSortMode
 import com.qoder.swiftpic.data.GalleryFilters
 import com.qoder.swiftpic.data.GalleryKeys
+import com.qoder.swiftpic.data.GallerySnapshot
+import com.qoder.swiftpic.data.GallerySnapshotStore
 import com.qoder.swiftpic.data.HomeLayout
 import com.qoder.swiftpic.data.Photo
 import com.qoder.swiftpic.data.SortMode
@@ -46,6 +48,7 @@ class MainActivity : BaseActivity() {
     private var loadedOnce = false
     private var lastAccess = false
     private var lastUserDataVersion = -1
+    private var lastSnapshotScannedAt = -1L
     private var currentDisplayedAlbumKeys: List<String> = emptyList()
     private var restoreScroll = RecyclerView.NO_POSITION
     private var restoreScrollOffset = 0
@@ -156,6 +159,17 @@ class MainActivity : BaseActivity() {
 
         binding.permissionButton.setOnClickListener { requestOrSettings() }
         binding.settingsButton.setOnClickListener { openAppSettings() }
+
+        // Paint the previous scan immediately (a few KB) while MediaStore is
+        // re-scanned in the background, so a cold start never shows an empty grid.
+        lifecycleScope.launch {
+            val snapshot = withContext(Dispatchers.IO) {
+                GallerySnapshotStore(this@MainActivity).restore()
+            }
+            if (snapshot != null && !loadedOnce && !isFinishing && !isDestroyed) {
+                renderPreview(snapshot)
+            }
+        }
 
         when {
             MediaPermissions.canReadImages(this) -> loadLibrary(force = false)
@@ -280,6 +294,44 @@ class MainActivity : BaseActivity() {
         }
     }
 
+    /** Lightweight first paint from the previous scan; replaced by [render] once the scan finishes. */
+    private fun renderPreview(snapshot: GallerySnapshot) {
+        val items = ArrayList<MainItem>(snapshot.albums.size + 3)
+        items.add(MainItem.Banner(snapshot.cover, snapshot.photoCount))
+        if (snapshot.favoritesCount > 0) {
+            val cover = snapshot.favoritesCover
+            items.add(
+                MainItem.AlbumRow(
+                    Album(
+                        GalleryKeys.FAVORITES,
+                        getString(R.string.favorites_album),
+                        listOfNotNull(cover),
+                        snapshot.favoritesCount
+                    ),
+                    cover,
+                    app.userData.isPinned(GalleryKeys.FAVORITES)
+                )
+            )
+        }
+        snapshot.albums.forEach { digest ->
+            val cover = digest.cover
+            items.add(
+                MainItem.AlbumRow(
+                    Album(digest.key, digest.name, listOfNotNull(cover), digest.count),
+                    cover,
+                    app.userData.isPinned(digest.key)
+                )
+            )
+        }
+        adapter.submit(items)
+        currentDisplayedAlbumKeys = snapshot.albums.map { it.key }
+        Log.d(TAG, "render preview albums=${snapshot.albums.size} photos=${snapshot.photoCount}")
+        binding.emptyState.visibility = View.GONE
+        binding.albums.visibility = View.VISIBLE
+        binding.loading.visibility = View.GONE
+        binding.toolbar.subtitle = getString(R.string.refreshing_snapshot)
+    }
+
     private fun render(library: GalleryLibrary) {
         if (!library.hasImageAccess) {
             showPermissionState()
@@ -350,6 +402,15 @@ class MainActivity : BaseActivity() {
         currentDisplayedAlbumKeys = visibleAlbums.map { it.key }
         lastUserDataVersion = app.userData.version
 
+        // Persist only once per actual scan (render also runs for sorting/pinning).
+        if (library.scannedAt != lastSnapshotScannedAt) {
+            lastSnapshotScannedAt = library.scannedAt
+            val favoritesSnapshot = favorites
+            lifecycleScope.launch(Dispatchers.IO) {
+                GallerySnapshotStore(this@MainActivity).save(library, favoritesSnapshot)
+            }
+        }
+
         if (restoreScroll != RecyclerView.NO_POSITION) {
             val target = restoreScroll.coerceIn(0, (adapter.itemCount - 1).coerceAtLeast(0))
             val offset = restoreScrollOffset
@@ -401,7 +462,10 @@ class MainActivity : BaseActivity() {
 
     private fun showAlbumMenu(item: MainItem.AlbumRow) {
         val album = item.album
-        if (album.key == GalleryKeys.FAVORITES) return
+        if (album.key == GalleryKeys.FAVORITES) {
+            MediaDetails.showAlbum(this, album)
+            return
+        }
         val pinned = app.userData.isPinned(album.key)
         val manual = app.userData.albumSort == AlbumSortMode.MANUAL
         val actions = ArrayList<Pair<String, () -> Unit>>(4)
@@ -423,6 +487,9 @@ class MainActivity : BaseActivity() {
                 showAlbumSortDialog(this, app.userData) { renderCached() }
             }
         )
+        actions.add(getString(R.string.view_details) to {
+            MediaDetails.showAlbum(this, album)
+        })
         MaterialAlertDialogBuilder(this)
             .setTitle(album.name)
             .setItems(actions.map { it.first }.toTypedArray()) { _, which ->

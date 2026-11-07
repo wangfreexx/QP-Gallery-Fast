@@ -2,11 +2,14 @@ package com.qoder.swiftpic.ui.viewer
 
 import com.qoder.swiftpic.ui.AppHint
 import android.graphics.Bitmap
+import android.graphics.Rect
 import android.graphics.drawable.AnimatedImageDrawable
 import android.graphics.drawable.Drawable
 import android.view.View
 import android.view.HapticFeedbackConstants
 import android.util.Log
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.recyclerview.widget.RecyclerView
 import com.qoder.swiftpic.R
 import com.qoder.swiftpic.data.DecodeSpec
@@ -26,6 +29,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.math.abs
 
 class PhotoPageHolder(
     private val binding: ViewPhotoPageBinding,
@@ -85,6 +90,9 @@ class PhotoPageHolder(
     private var liveMuted = false
     private var autoPlayTriggered = false
     private val hideZoomBadge = Runnable { binding.zoomBadge.visibility = View.GONE }
+    private var regionDecoder: ImageRegionDecoder? = null
+    private var regionDecoderJob: Job? = null
+    private var regionTileJob: Job? = null
 
     fun bind(newPhoto: Photo, position: Int, active: Boolean) {
         teardownMedia()
@@ -139,6 +147,7 @@ class PhotoPageHolder(
             if (!released) callback.onPageRequest(this, delta)
         }
         binding.zoomImage.onZoomChanged = { ratio -> onZoomRatio(ratio) }
+        binding.zoomImage.onVisibleRegionChanged = null
         binding.zoomBadge.removeCallbacks(hideZoomBadge)
         binding.zoomBadge.visibility = View.GONE
         binding.liveTexture.setOnClickListener {
@@ -166,27 +175,83 @@ class PhotoPageHolder(
         if (released) return
         val badge = binding.zoomBadge
         badge.removeCallbacks(hideZoomBadge)
-        if (ratio <= 1.02f) {
+        // Only the resting fit state hides the badge: zooming out below 1x is
+        // still a zoom level the user wants to see (e.g. 0.6x).
+        if (abs(ratio - 1f) < 0.02f) {
             badge.visibility = View.GONE
             return
         }
-        val wasHidden = badge.visibility != View.VISIBLE
         val text = String.format(java.util.Locale.US, "%.1fx", ratio)
         if (badge.text?.toString() != text) badge.text = text
-        if (wasHidden) positionZoomBadge()
+        val wasHidden = badge.visibility != View.VISIBLE
+        positionZoomBadge()
         badge.visibility = View.VISIBLE
         if (wasHidden) {
-            Log.d("SwiftPicPage", "zoom badge $text name=${photo.name}")
+            Log.d("SwiftPicPage", "zoom badge show $text y=${badge.y}")
         }
         badge.postDelayed(hideZoomBadge, 1400L)
     }
 
-    /** The header name/date sits exactly where the badge used to float. */
+    /** Keep the badge in the top safe area instead of jumping to y=0 when chrome hides. */
     private fun positionZoomBadge() {
-        val chrome = activity.findViewById<View>(R.id.topChrome)
         val density = activity.resources.displayMetrics.density
-        val top = if (chrome != null && chrome.visibility == View.VISIBLE) chrome.bottom else 0
-        binding.zoomBadge.y = top + 10f * density
+        val chrome = activity.findViewById<View>(R.id.topChrome)
+        val chromeBottom = if (chrome != null && chrome.visibility == View.VISIBLE) {
+            chrome.bottom
+        } else {
+            0
+        }
+        val insets = ViewCompat.getRootWindowInsets(binding.root)
+        val statusTop = insets?.getInsets(WindowInsetsCompat.Type.statusBars())?.top ?: 0
+        // In immersive mode the status bar is gone but the punch-hole / notch is
+        // still there; a centred badge would sit exactly behind it.
+        val cutoutBottom = insets?.displayCutout?.boundingRects
+            ?.maxOfOrNull { it.bottom } ?: 0
+        binding.zoomBadge.y = maxOf(chromeBottom, statusTop, cutoutBottom) + 12f * density
+    }
+
+    private fun attachRegionDecoder(
+        hasGainMap: Boolean,
+        displayWidth: Int,
+        displayHeight: Int
+    ) {
+        // Ultra HDR gain maps only survive ImageDecoder.decodeBitmap; overlaying
+        // an SDR region would create a visible brightness seam.
+        if (hasGainMap) return
+        regionDecoderJob?.cancel()
+        regionDecoderJob = scope.launch {
+            val decoder = withContext(Dispatchers.IO) {
+                ImageRegionDecoder.create(
+                    activity, photo.uri, displayWidth, displayHeight
+                )
+            }
+            if (released || decoder == null) {
+                decoder?.close()
+                return@launch
+            }
+            regionDecoder?.close()
+            regionDecoder = decoder
+            binding.zoomImage.onVisibleRegionChanged = { rect, w, h ->
+                requestRegionTile(rect, w, h)
+            }
+        }
+    }
+
+    private fun requestRegionTile(rect: Rect, viewW: Int, viewH: Int) {
+        val decoder = regionDecoder ?: return
+        regionTileJob?.cancel()
+        regionTileJob = scope.launch {
+            val tile = withContext(Dispatchers.IO) {
+                decoder.decode(rect, viewW, viewH)
+            }
+            if (released || regionDecoder !== decoder) {
+                tile?.recycle()
+                return@launch
+            }
+            if (tile != null) {
+                binding.zoomImage.setRegionTile(tile, rect)
+            }
+        }
     }
 
     fun setActive(active: Boolean) {
@@ -311,6 +376,7 @@ class PhotoPageHolder(
         binding.zoomImage.onLongPressEnd = null
         binding.zoomImage.onEdgePage = null
         binding.zoomImage.onZoomChanged = null
+        binding.zoomImage.onVisibleRegionChanged = null
         binding.zoomBadge.removeCallbacks(hideZoomBadge)
         binding.zoomImage.contentDescription = null
         binding.liveTexture.setOnClickListener(null)
@@ -331,6 +397,11 @@ class PhotoPageHolder(
                 when (decoded) {
                     is DecodedImage.Still -> {
                         binding.zoomImage.setBitmap(decoded.bitmap)
+                        attachRegionDecoder(
+                            decoded.hasGainMap,
+                            decoded.decodedWidth,
+                            decoded.decodedHeight
+                        )
                         HdrDetector.remember(photo, decoded.hasGainMap)
                         uiState = uiState.copy(
                             loading = false,
@@ -706,6 +777,13 @@ class PhotoPageHolder(
     private fun teardownMedia() {
         imageJob?.cancel()
         imageJob = null
+        regionDecoderJob?.cancel()
+        regionDecoderJob = null
+        regionTileJob?.cancel()
+        regionTileJob = null
+        binding.zoomImage.onVisibleRegionChanged = null
+        regionDecoder?.close()
+        regionDecoder = null
         binding.zoomImage.clearImage()
         val player = gifPlayer
         val frame = gifFrame

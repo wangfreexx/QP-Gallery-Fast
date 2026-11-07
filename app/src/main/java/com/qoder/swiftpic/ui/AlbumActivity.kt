@@ -636,6 +636,14 @@ class AlbumActivity : BaseActivity() {
             showDestinationDialog(move = false)
         }
         addSelectionAction(R.drawable.ic_tag, getString(R.string.tags)) { editTagsSelected() }
+        addSelectionAction(R.drawable.ic_info, getString(R.string.view_details)) {
+            val selected = selectedPhotos()
+            if (selected.size == 1) {
+                MediaDetails.showPhoto(this, selected.first())
+            } else {
+                AppHint.show(this, R.string.select_one_for_details)
+            }
+        }
         coverAction = addSelectionAction(R.drawable.ic_image, getString(R.string.set_cover)) {
             setCoverSelected()
         }
