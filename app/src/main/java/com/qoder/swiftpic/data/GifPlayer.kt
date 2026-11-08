@@ -296,18 +296,24 @@ class GifPlayer(
                     return candidate
                 }
             }
-            return Bitmap.createBitmap(width, height, config)
+            val created = Bitmap.createBitmap(width, height, config)
+            CacheStats.addGifFrame(created)
+            return created
         }
 
         @Synchronized
         override fun release(bitmap: Bitmap) {
             if (closed.get() || bitmap.isRecycled) {
-                if (!bitmap.isRecycled) bitmap.recycle()
+                if (!bitmap.isRecycled) {
+                    CacheStats.removeGifFrame(bitmap)
+                    bitmap.recycle()
+                }
                 return
             }
             if (pool.size < 3) {
                 pool.addLast(bitmap)
             } else {
+                CacheStats.removeGifFrame(bitmap)
                 bitmap.recycle()
             }
         }
@@ -323,7 +329,12 @@ class GifPlayer(
         @Synchronized
         fun recycleAll() {
             closed.set(true)
-            pool.forEach { if (!it.isRecycled) it.recycle() }
+            pool.forEach {
+                if (!it.isRecycled) {
+                    CacheStats.removeGifFrame(it)
+                    it.recycle()
+                }
+            }
             pool.clear()
         }
     }

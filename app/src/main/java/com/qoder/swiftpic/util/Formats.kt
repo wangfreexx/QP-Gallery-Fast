@@ -33,8 +33,16 @@ object Formats {
         }
     }
 
+    /** Formatter.formatFileSize uses 1000-based SI units for every byte value. */
     fun cacheSize(context: Context, bytes: Long): String =
         if (bytes <= 0L) "0 B" else Formatter.formatFileSize(context, bytes)
+
+    /**
+     * Both numbers go through the same formatter, so a 1024-based limit such as
+     * 72 MiB is displayed as "75 MB" on both sides of the slash -- no mismatch.
+     */
+    fun cacheRatio(context: Context, used: Long, limit: Long): String =
+        "${cacheSize(context, used)} / ${cacheSize(context, limit)}"
 
     fun size(context: Context, bytes: Long): String {
         return if (bytes <= 0) "未知" else Formatter.formatFileSize(context, bytes)

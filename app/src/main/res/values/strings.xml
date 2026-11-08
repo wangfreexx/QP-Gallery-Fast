@@ -139,7 +139,7 @@
     <string name="live_default_mute">实况默认静音</string>
     <string name="live_default_mute_summary">自动播放时不输出声音，可随时取消静音</string>
     <string name="cache_clear">清理缓存</string>
-    <string name="cache_clear_summary">缩略图、整图内存缓存和实况视频缓存</string>
+    <string name="cache_clear_summary">缩略图、整图、区域解码与 GIF 帧位图缓存，以及全部磁盘缓存；自选壁纸与相册快照属于用户数据，不会被清除</string>
     <string name="cache_cleared">缓存已清理</string>
     <string name="version_label">版本 %1$s</string>
     <string name="export_wallpaper">设为壁纸</string>
@@ -283,7 +283,7 @@
     <string name="background_pick_failed">无法读取这张图片</string>
     <string name="background_pick_done">背景图片已更新</string>
     <string name="cache_usage">缓存占用</string>
-    <string name="cache_usage_value">内存 %1$s · 磁盘 %2$s</string>
+    <string name="cache_usage_value">内存缓存 %1$s · 磁盘 %2$s</string>
     <string name="manual_sort_required">切换为手动排序后才能上移/下移</string>
     <string name="delete_album">删除相册</string>
     <string name="delete_album_title">删除「%1$s」的 %2$d 张照片？</string>

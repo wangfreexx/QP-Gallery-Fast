@@ -15,6 +15,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.qoder.swiftpic.R
 import com.qoder.swiftpic.data.AlbumSortMode
 import com.qoder.swiftpic.data.BackgroundMode
+import com.qoder.swiftpic.data.CacheStats
 import com.qoder.swiftpic.data.HomeLayout
 import com.qoder.swiftpic.data.OrientationMode
 import com.qoder.swiftpic.data.ThemeMode
@@ -96,7 +97,6 @@ class SettingsActivity : BaseActivity() {
         binding.toolbar.setNavigationOnClickListener { finish() }
         ThemeUtils.tintToolbarMenu(binding.toolbar)
         buildRows()
-        refreshCacheSize()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -107,6 +107,8 @@ class SettingsActivity : BaseActivity() {
     override fun onResume() {
         super.onResume()
         if (::binding.isInitialized) buildRows()
+        // Caches grow and get trimmed while browsing; never show a stale snapshot.
+        refreshCacheSize()
     }
 
     /**
@@ -684,12 +686,18 @@ class SettingsActivity : BaseActivity() {
     private fun refreshCacheSize() {
         lifecycleScope.launch {
             val value = withContext(Dispatchers.IO) {
-                val memory = app.thumbnails.memoryCacheBytes().toLong() +
-                    app.images.memoryCacheBytes().toLong()
+                // Two LruCaches plus transient Java-heap bitmaps (region tiles and
+                // GIF frames). Wallpaper / snapshot in filesDir are user data, not cache.
+                val used = app.thumbnails.memoryCacheBytes().toLong() +
+                    app.images.memoryCacheBytes().toLong() +
+                    CacheStats.transientBytes()
+                val limit = app.thumbnails.maxCacheBytes().toLong() +
+                    app.images.maxCacheBytes().toLong()
                 val disk = app.motion.diskCacheBytes()
+                Log.d(TAG, "cache used=$used limit=$limit disk=$disk")
                 getString(
                     R.string.cache_usage_value,
-                    Formats.cacheSize(this@SettingsActivity, memory),
+                    Formats.cacheRatio(this@SettingsActivity, used, limit),
                     Formats.cacheSize(this@SettingsActivity, disk)
                 )
             }

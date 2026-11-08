@@ -24,6 +24,7 @@ import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.animation.DecelerateInterpolator
 import android.widget.OverScroller
+import com.qoder.swiftpic.data.CacheStats
 import com.qoder.swiftpic.data.TransparencyBackdrop
 import com.qoder.swiftpic.swiftPic
 import com.qoder.swiftpic.ui.widget.CheckerPattern
@@ -283,6 +284,7 @@ class ZoomImageView @JvmOverloads constructor(
         val previous = regionTile
         regionTile = bitmap
         regionRect = if (bitmap != null) rect else null
+        CacheStats.swapRegionTile(previous, bitmap)
         if (previous !== bitmap) previous?.recycle()
         if (bitmap == null && previous != null) Log.d(TAG, "region tile cleared")
         invalidate()
@@ -719,6 +721,9 @@ class ZoomImageView @JvmOverloads constructor(
         removeCallbacks(regionRequest)
         removeCallbacks(interactionEnd)
         interacting = false
+        // A detached page may never go through clearImage(); release the tile
+        // here or every paged-in photo leaks a full-resolution region bitmap.
+        setRegionTile(null, null)
     }
 
     private companion object {

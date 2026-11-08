@@ -12,6 +12,9 @@ import android.os.Build
 import android.util.Log
 import android.util.LruCache
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -28,9 +31,13 @@ data class DecodeSpec(
     companion object {
         fun forScreen(screenWidth: Int, screenHeight: Int): DecodeSpec {
             val longest = max(screenWidth, screenHeight).coerceAtLeast(1)
+            // The base bitmap only needs to cover the screen with a modest
+            // margin: zooming past 1.4x is handled by ImageRegionDecoder.
+            // 8 MP meant ~32 MB per page and turned fast paging into a GC
+            // storm; 4 MP (~16 MB) is still ~1.6x supersampled at fit size.
             return DecodeSpec(
-                maxDimension = min(4096, (longest * 2.2f).roundToInt()),
-                maxPixels = 8_000_000L
+                maxDimension = min(2560, (longest * 1.6f).roundToInt()),
+                maxPixels = 4_000_000L
             )
         }
     }
@@ -82,6 +89,13 @@ class ImageLoader(private val context: Context) {
                 repeat(2) { attempt ->
                     try {
                         val result = decodeInternal(photo, attemptSpec)
+                        // The page can scroll away while a 30 MB bitmap is being
+                        // decoded. Recycle it right here instead of handing it to
+                        // a cancelled caller that will never display or cache it.
+                        if (!currentCoroutineContext().isActive) {
+                            (result as? DecodedImage.Still)?.bitmap?.recycle()
+                            currentCoroutineContext().ensureActive()
+                        }
                         if (result is DecodedImage.Still &&
                             result.bitmap.allocationByteCount < maxCachedBitmapBytes
                         ) {
@@ -204,6 +218,8 @@ class ImageLoader(private val context: Context) {
     }
 
     fun memoryCacheBytes(): Int = cache.size()
+
+    fun maxCacheBytes(): Int = cache.maxSize()
 
     private fun key(photo: Photo, spec: DecodeSpec): String =
         "${photo.uri}|${photo.dateModifiedMs}|${spec.maxDimension}|${spec.maxPixels}"

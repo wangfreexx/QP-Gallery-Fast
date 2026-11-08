@@ -28,9 +28,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
+
+/** A page must settle before we spend a 16 MB read on its motion-photo probe. */
+private const val LIVE_PROBE_DELAY_MS = 350L
 
 class PhotoPageHolder(
     private val binding: ViewPhotoPageBinding,
@@ -585,10 +589,14 @@ class PhotoPageHolder(
      * autoplay starts right away instead of after a probe+copy wait.
      */
     private fun prefetchEmbeddedLive() {
-        if (released || liveProbeAttempted) return
+        if (released || liveProbeAttempted || liveProbeJob?.isActive == true) return
         if (photo.hasLivePair || !photo.canContainMotionPhoto) return
-        liveProbeAttempted = true
         liveProbeJob = scope.launch {
+            // Fast paging used to read 16 MB for every photo we flew past.
+            // onDeactivated() cancels this job, so only the settled page probes.
+            delay(LIVE_PROBE_DELAY_MS)
+            if (released || !isActive) return@launch
+            liveProbeAttempted = true
             val result = try {
                 app.motion.probe(photo)
             } catch (e: CancellationException) {

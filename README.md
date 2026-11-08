@@ -62,7 +62,7 @@ Kotlin + View 体系，无广告、无联网、无账号。
 从 [Releases](https://github.com/wangfreexx/QP-Gallery-Fast/releases) 下载 APK 安装：
 
 ```bash
-adb install SwiftPic-v1.9.2-release.apk
+adb install SwiftPic-v1.9.3-release.apk
 ```
 
 首次启动授予照片读取权限即可。

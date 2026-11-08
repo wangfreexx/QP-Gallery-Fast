@@ -11,6 +11,9 @@ import android.util.Log
 import android.util.LruCache
 import android.util.Size
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -45,13 +48,24 @@ class ThumbnailLoader(private val context: Context) {
         }
         return withContext(Dispatchers.IO) {
             semaphore.withPermit {
+                // The row may have scrolled away while this request waited for
+                // a permit; never spend time decoding an abandoned thumbnail.
+                currentCoroutineContext().ensureActive()
                 val alpha = known ?: detectAlpha(photo, preserveAlpha)
+                currentCoroutineContext().ensureActive()
                 cache.get(key(photo, sizePx, alpha))?.let { return@withPermit it }
                 val bitmap = try {
                     loadInternal(photo, sizePx, alpha)
                 } catch (e: Exception) {
                     Log.w(TAG, "thumbnail failed for ${photo.uri}", e)
                     null
+                }
+                // The row can scroll away *during* decode. Recycle the fresh
+                // bitmap instead of returning it to a cancelled caller, which
+                // was leaking native pixel memory on every fast fling.
+                if (!currentCoroutineContext().isActive) {
+                    bitmap?.recycle()
+                    currentCoroutineContext().ensureActive()
                 }
                 if (bitmap != null) {
                     cache.put(key(photo, sizePx, alpha), bitmap)
@@ -166,6 +180,8 @@ class ThumbnailLoader(private val context: Context) {
     }
 
     fun memoryCacheBytes(): Int = cache.size()
+
+    fun maxCacheBytes(): Int = cache.maxSize()
 
     private fun key(photo: Photo, sizePx: Int, alpha: Boolean): String =
         "${photo.uri}|${photo.dateModifiedMs}|$sizePx|${if (alpha) "a" else "o"}"

@@ -4,7 +4,10 @@ import android.content.Context
 import android.net.Uri
 import android.util.LruCache
 import com.qoder.swiftpic.swiftPic
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -18,7 +21,7 @@ object LiveDetector {
 
     private const val HEAD_BYTES = 256 * 1024
 
-    private val cache = LruCache<String, Boolean>(2048)
+    private val cache = LruCache<String, Boolean>(8192)
     private val gate = Semaphore(2)
 
     // Xiaomi writes Container:Directory (Primary + GainMap) into ordinary HDR shots too,
@@ -50,11 +53,13 @@ object LiveDetector {
         return detected
     }
 
-    private fun scanHead(context: Context, uri: Uri): Boolean {
+    private suspend fun scanHead(context: Context, uri: Uri): Boolean {
         val head = try {
             context.contentResolver.openInputStream(uri)?.use { input ->
                 input.buffered(64 * 1024).readUpTo(HEAD_BYTES)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             android.util.Log.w("SwiftPicLive", "open failed $uri", e)
             null
@@ -83,11 +88,12 @@ object LiveDetector {
         return -1
     }
 
-    private fun java.io.InputStream.readUpTo(max: Int): ByteArray {
+    private suspend fun java.io.InputStream.readUpTo(max: Int): ByteArray {
         val out = java.io.ByteArrayOutputStream(minOf(max, 64 * 1024))
         val buffer = ByteArray(64 * 1024)
         var remaining = max
         while (remaining > 0) {
+            currentCoroutineContext().ensureActive()
             val read = read(buffer, 0, minOf(buffer.size, remaining))
             if (read <= 0) break
             out.write(buffer, 0, read)

@@ -5,7 +5,10 @@ import android.content.Context
 import android.net.Uri
 import android.util.Log
 import android.util.LruCache
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -20,7 +23,7 @@ object HdrDetector {
         "GainMap".toByteArray(Charsets.US_ASCII)
     )
     private val guard = Semaphore(2)
-    private val cache = LruCache<String, Boolean>(768)
+    private val cache = LruCache<String, Boolean>(4096)
 
     /** Same identity as LiveDetector / MotionPhotoProbe, so caches agree. */
     private fun key(photo: Photo): String =
@@ -48,7 +51,7 @@ object HdrDetector {
         cache.evictAll()
     }
 
-    private fun scan(resolver: ContentResolver, uri: Uri): Boolean {
+    private suspend fun scan(resolver: ContentResolver, uri: Uri): Boolean {
         return try {
             resolver.openInputStream(uri)?.use { input ->
                 val buffer = ByteArray(16 * 1024)
@@ -56,6 +59,9 @@ object HdrDetector {
                 var carryLength = 0
                 var total = 0
                 while (total < MAX_HEAD_BYTES) {
+                    // A cancelled grid row must stop reading immediately,
+                    // otherwise fast scrolling piles up unstoppable 256 KB reads.
+                    currentCoroutineContext().ensureActive()
                     val read = input.read(buffer)
                     if (read <= 0) break
                     val window = ByteArray(carryLength + read)
@@ -68,6 +74,8 @@ object HdrDetector {
                 }
                 false
             } ?: false
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.w(TAG, "hdr scan failed for $uri", e)
             false

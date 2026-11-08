@@ -96,21 +96,12 @@ class MotionPhotoProbe(private val context: Context) {
         }
     }
 
-    fun diskCacheBytes(): Long {
-        val dir = File(context.cacheDir, "motion")
-        if (!dir.isDirectory) return 0L
-        return dir.walk()
-            .filter { it.isFile }
-            .sumOf { it.length() }
-    }
+    /** Whole cacheDir: the reported size and the clear action must use the same scope. */
+    fun diskCacheBytes(): Long = CacheStats.diskCacheBytes(context)
 
     fun clearDiskCache() {
         clearMemoryCache()
-        try {
-            File(context.cacheDir, "motion").deleteRecursively()
-        } catch (e: Exception) {
-            Log.w(TAG, "clearDiskCache failed", e)
-        }
+        CacheStats.clearDiskCache(context)
     }
 
     fun trimCache() {
@@ -215,16 +206,16 @@ class MotionPhotoProbe(private val context: Context) {
     }
 
     private fun InputStream.readUpTo(max: Int): ByteArray {
-        val out = java.io.ByteArrayOutputStream(minOf(max, 64 * 1024))
-        val buffer = ByteArray(64 * 1024)
-        var remaining = max
-        while (remaining > 0) {
-            val read = read(buffer, 0, minOf(buffer.size, remaining))
+        // Pre-allocate once. ByteArrayOutputStream.toByteArray() used to double
+        // the peak (16 MB buffer + 16 MB copy) for every motion-photo probe.
+        val out = ByteArray(max)
+        var offset = 0
+        while (offset < max) {
+            val read = read(out, offset, max - offset)
             if (read <= 0) break
-            out.write(buffer, 0, read)
-            remaining -= read
+            offset += read
         }
-        return out.toByteArray()
+        return if (offset == max) out else out.copyOf(offset)
     }
 
     private fun skipFully(input: InputStream, count: Long) {
@@ -272,7 +263,7 @@ class MotionPhotoProbe(private val context: Context) {
 
     private companion object {
         const val TAG = "SwiftPicMotion"
-        const val HEAD_BYTES = 1024 * 1024
+        const val HEAD_BYTES = 256 * 1024
         const val TAIL_BYTES = 16L * 1024 * 1024
         const val MAX_CACHE_ENTRIES = 256
         val HEX = "0123456789abcdef".toCharArray()
