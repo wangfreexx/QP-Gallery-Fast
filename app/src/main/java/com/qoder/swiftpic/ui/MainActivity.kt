@@ -49,6 +49,8 @@ class MainActivity : BaseActivity() {
     private var lastAccess = false
     private var lastUserDataVersion = -1
     private var lastSnapshotScannedAt = -1L
+    /** scannedAt of the library currently painted in the adapter. */
+    private var lastRenderedScanAt = -1L
     private var currentDisplayedAlbumKeys: List<String> = emptyList()
     private var restoreScroll = RecyclerView.NO_POSITION
     private var restoreScrollOffset = 0
@@ -219,10 +221,14 @@ class MainActivity : BaseActivity() {
         }
         if (!loading) {
             val cached = app.gallery.peek()
-            if (loadedOnce && cached != null && app.userData.version != lastUserDataVersion) {
-                render(cached)
-            } else if (!loadedOnce || !lastAccess || app.gallery.isDirty()) {
-                loadLibrary(force = false)
+            when {
+                // A delete/move marks the repo dirty; always rescan first.
+                app.gallery.isDirty() || !loadedOnce || !lastAccess ->
+                    loadLibrary(force = false)
+                // Another screen may have refreshed the repository already
+                // (clearing dirty) while this activity still holds the old list.
+                cached != null && (app.userData.version != lastUserDataVersion ||
+                    cached.scannedAt != lastRenderedScanAt) -> render(cached)
             }
         }
     }
@@ -333,6 +339,7 @@ class MainActivity : BaseActivity() {
     }
 
     private fun render(library: GalleryLibrary) {
+        lastRenderedScanAt = library.scannedAt
         if (!library.hasImageAccess) {
             showPermissionState()
             return

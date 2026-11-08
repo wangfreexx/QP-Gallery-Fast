@@ -85,6 +85,17 @@ class MainAdapter(
         }
     }
 
+    override fun onViewAttachedToWindow(holder: RecyclerView.ViewHolder) {
+        super.onViewAttachedToWindow(holder)
+        // Returning from the viewer/settings detaches these rows without a
+        // rebind; refill covers whose loads were cancelled on detach.
+        when (holder) {
+            is BannerHolder -> holder.reloadIfBlank()
+            is AlbumHolder -> holder.reloadIfBlank()
+            is AlbumListHolder -> holder.reloadIfBlank()
+        }
+    }
+
     override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
         when (holder) {
             is BannerHolder -> holder.cancel()
@@ -95,11 +106,9 @@ class MainAdapter(
     }
 
     override fun onViewDetachedFromWindow(holder: RecyclerView.ViewHolder) {
-        when (holder) {
-            is BannerHolder -> holder.cancel()
-            is AlbumHolder -> holder.cancel()
-            is AlbumListHolder -> holder.cancel()
-        }
+        // Do not cancel cover loads here: returning from the viewer/settings
+        // attaches the same row again without rebinding, so a cancelled cover
+        // would stay blank. Reuse and recycling still cancel via onViewRecycled.
         super.onViewDetachedFromWindow(holder)
     }
 
@@ -108,8 +117,10 @@ class MainAdapter(
     ) : RecyclerView.ViewHolder(binding.root) {
 
         private var job: Job? = null
+        private var currentItem: MainItem.Banner? = null
 
         fun bind(item: MainItem.Banner) {
+            currentItem = item
             binding.bannerCount.text = binding.root.context.getString(R.string.photo_count, item.count)
             binding.bannerCard.contentDescription = binding.root.context.getString(R.string.all_photos)
             binding.bannerCard.setOnClickListener { onClick(item) }
@@ -129,6 +140,10 @@ class MainAdapter(
                     binding.bannerCover.setImageBitmap(bitmap)
                 }
             }
+        }
+
+        fun reloadIfBlank() {
+            if (binding.bannerCover.drawable == null) currentItem?.let { bind(it) }
         }
 
         fun cancel() {
@@ -151,9 +166,11 @@ class MainAdapter(
 
         private val jobs = ArrayList<Job>(3)
         private val backs = ArrayList<Photo>(2)
+        private var currentItem: MainItem.AlbumRow? = null
         private val tagViews = arrayOf(binding.albumTag1, binding.albumTag2)
 
         fun bind(item: MainItem.AlbumRow) {
+            currentItem = item
             val context = binding.root.context
             val album = item.album
             binding.albumName.text = album.name
@@ -225,6 +242,10 @@ class MainAdapter(
             })
         }
 
+        fun reloadIfBlank() {
+            if (binding.albumCover.drawable == null) currentItem?.let { bind(it) }
+        }
+
         fun cancel() {
             jobs.forEach { it.cancel() }
             jobs.clear()
@@ -236,8 +257,10 @@ class MainAdapter(
     ) : RecyclerView.ViewHolder(binding.root) {
 
         private var job: Job? = null
+        private var currentItem: MainItem.AlbumRow? = null
 
         fun bind(item: MainItem.AlbumRow) {
+            currentItem = item
             val context = binding.root.context
             val album = item.album
             binding.albumName.text = album.name
@@ -270,6 +293,10 @@ class MainAdapter(
                     binding.albumCover.setImageBitmap(bitmap)
                 }
             }
+        }
+
+        fun reloadIfBlank() {
+            if (binding.albumCover.drawable == null) currentItem?.let { bind(it) }
         }
 
         fun cancel() {

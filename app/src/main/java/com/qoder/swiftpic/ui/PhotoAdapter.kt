@@ -249,13 +249,22 @@ class PhotoAdapter(
         }
     }
 
+    override fun onViewAttachedToWindow(holder: RecyclerView.ViewHolder) {
+        super.onViewAttachedToWindow(holder)
+        // Opening the viewer detaches (and cancels) every row. Coming back does
+        // not rebind them, so refill any thumbnail that never finished loading.
+        (holder as? PhotoHolder)?.reloadThumbnailIfBlank()
+    }
+
     override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
         (holder as? PhotoHolder)?.cancel()
         super.onViewRecycled(holder)
     }
 
     override fun onViewDetachedFromWindow(holder: RecyclerView.ViewHolder) {
-        (holder as? PhotoHolder)?.cancel()
+        // Keep the thumbnail job alive: a viewer round-trip may detach this row
+        // and attach it again without rebinding. Only the probe IO is dropped.
+        (holder as? PhotoHolder)?.cancelProbes()
         super.onViewDetachedFromWindow(holder)
     }
 
@@ -274,10 +283,12 @@ class PhotoAdapter(
         private var job: Job? = null
         private var hdrJob: Job? = null
         private var liveJob: Job? = null
+        private var currentItem: PhotoGridItem.PhotoRow? = null
         private val tagViews = arrayOf(binding.photoTag1, binding.photoTag2)
 
         fun bind(item: PhotoGridItem.PhotoRow) {
             val photo = item.photo
+            currentItem = item
             binding.root.contentDescription = photo.name
             binding.root.setOnClickListener {
                 if (selectionMode) toggleSelection(photo) else onClick(item.photoIndex)
@@ -395,13 +406,38 @@ class PhotoAdapter(
             }
         }
 
-        fun cancel() {
+        /** Re-attached without a rebind: restore a thumbnail cancelled on detach. */
+        fun reloadThumbnailIfBlank() {
+            val item = currentItem ?: return
+            if (binding.photoImage.drawable != null) return
+            val photo = item.photo
+            val checker = binding.root.context.swiftPic.prefs.transparencyBackdrop ==
+                TransparencyBackdrop.CHECKER
+            val tag = photo.uri.toString()
+            thumbnails.peek(photo, preserveAlpha = checker)?.let {
+                binding.photoImage.setImageBitmap(it)
+                return
+            }
             job?.cancel()
-            job = null
+            job = scope.launch {
+                val bitmap = thumbnails.load(photo, preserveAlpha = checker)
+                if (bitmap != null && binding.photoImage.tag == tag) {
+                    binding.photoImage.setImageBitmap(bitmap)
+                }
+            }
+        }
+
+        fun cancelProbes() {
             hdrJob?.cancel()
             hdrJob = null
             liveJob?.cancel()
             liveJob = null
+        }
+
+        fun cancel() {
+            job?.cancel()
+            job = null
+            cancelProbes()
         }
     }
 

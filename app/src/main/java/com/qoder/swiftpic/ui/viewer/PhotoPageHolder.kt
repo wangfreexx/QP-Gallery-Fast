@@ -97,6 +97,8 @@ class PhotoPageHolder(
     private var regionDecoder: ImageRegionDecoder? = null
     private var regionDecoderJob: Job? = null
     private var regionTileJob: Job? = null
+    /** Newest viewport queued while a decode is already running. */
+    private var pendingRegion: Triple<Rect, Int, Int>? = null
 
     fun bind(newPhoto: Photo, position: Int, active: Boolean) {
         teardownMedia()
@@ -121,6 +123,7 @@ class PhotoPageHolder(
         binding.pageProgress.visibility = View.GONE
         binding.errorBox.visibility = View.GONE
         binding.liveTexture.visibility = View.GONE
+        binding.zoomImage.alpha = 1f
         binding.zoomImage.contentDescription = photo.name
 
         uiState = UiState(
@@ -134,6 +137,15 @@ class PhotoPageHolder(
             val width = binding.zoomImage.width.coerceAtLeast(1)
             val height = binding.zoomImage.height.coerceAtLeast(1)
             callback.onTap(this, x / width, y / height)
+        }
+        binding.zoomImage.onRelativeTransform = { m ->
+            liveController?.setZoomTransform(m)
+        }
+        // The video layer sits on top; forward its touches so pinch/pan still
+        // reaches the zoom view even while the still is transparent.
+        binding.liveTexture.setOnTouchListener { _, event ->
+            binding.zoomImage.onTouchEvent(event)
+            true
         }
         binding.zoomImage.doubleTapAllowed = { fraction ->
             callback.allowDoubleTapZoom(this, fraction)
@@ -243,7 +255,22 @@ class PhotoPageHolder(
 
     private fun requestRegionTile(rect: Rect, viewW: Int, viewH: Int) {
         val decoder = regionDecoder ?: return
-        regionTileJob?.cancel()
+        if (regionTileJob?.isActive == true) {
+            // BitmapRegionDecoder is not thread-safe. Never cancel a running
+            // decode either, or continuous panning would starve the tile layer;
+            // just remember the newest viewport for the next pass.
+            pendingRegion = Triple(rect, viewW, viewH)
+            return
+        }
+        decodeRegion(decoder, rect, viewW, viewH)
+    }
+
+    private fun decodeRegion(
+        decoder: ImageRegionDecoder,
+        rect: Rect,
+        viewW: Int,
+        viewH: Int
+    ) {
         regionTileJob = scope.launch {
             val tile = withContext(Dispatchers.IO) {
                 decoder.decode(rect, viewW, viewH)
@@ -254,6 +281,11 @@ class PhotoPageHolder(
             }
             if (tile != null) {
                 binding.zoomImage.setRegionTile(tile, rect)
+            }
+            val next = pendingRegion
+            pendingRegion = null
+            if (next != null && !released && regionDecoder === decoder) {
+                decodeRegion(decoder, next.first, next.second, next.third)
             }
         }
     }
@@ -381,9 +413,11 @@ class PhotoPageHolder(
         binding.zoomImage.onEdgePage = null
         binding.zoomImage.onZoomChanged = null
         binding.zoomImage.onVisibleRegionChanged = null
+        binding.zoomImage.onRelativeTransform = null
         binding.zoomBadge.removeCallbacks(hideZoomBadge)
         binding.zoomImage.contentDescription = null
         binding.liveTexture.setOnClickListener(null)
+        binding.liveTexture.setOnTouchListener(null)
     }
 
     private fun loadMedia() {
@@ -564,6 +598,8 @@ class PhotoPageHolder(
     }
 
     private fun onDeactivated() {
+        // Switching pages invalidates the old zoom and releases its tile.
+        binding.zoomImage.resetZoom()
         gifPlayer?.pause()
         (animatedDrawable as? AnimatedImageDrawable)?.stop()
         userPausedGif = false
@@ -730,9 +766,11 @@ class PhotoPageHolder(
 
                 override fun onPlayingChanged(playing: Boolean) {
                     if (released) return
-                    // TextureView cannot paint a background; hide the still so the
-                    // letterboxed video sits on the black page instead.
-                    binding.zoomImage.visibility = if (playing) View.INVISIBLE else View.VISIBLE
+                    // Keep the still VISIBLE but transparent: an INVISIBLE view
+                    // receives no gestures. Its transform is mirrored onto the
+                    // video layer, so pinch/pan zooms both together.
+                    binding.zoomImage.visibility = View.VISIBLE
+                    binding.zoomImage.alpha = if (playing) 0f else 1f
                     uiState = uiState.copy(
                         livePlaying = playing,
                         liveBusy = if (playing) false else uiState.liveBusy
@@ -747,6 +785,8 @@ class PhotoPageHolder(
             }
         )
         liveController = controller
+        // Playback may start while the still is already zoomed.
+        binding.zoomImage.emitRelativeTransform()
         return controller
     }
 
@@ -757,6 +797,7 @@ class PhotoPageHolder(
         liveController = null
         binding.liveTexture.visibility = View.GONE
         binding.zoomImage.visibility = View.VISIBLE
+        binding.zoomImage.alpha = 1f
     }
 
     private fun failLive(message: String) {
@@ -789,6 +830,7 @@ class PhotoPageHolder(
         regionDecoderJob = null
         regionTileJob?.cancel()
         regionTileJob = null
+        pendingRegion = null
         binding.zoomImage.onVisibleRegionChanged = null
         regionDecoder?.close()
         regionDecoder = null

@@ -35,6 +35,8 @@ class LivePhotoController(
     private var muted = muted
     private var videoWidth = 0
     private var videoHeight = 0
+    /** Transform from the fitted still to the current zoom/pan state. */
+    private var zoom: Matrix? = null
 
     val isPrepared: Boolean
         get() = prepared && !released
@@ -208,17 +210,34 @@ class LivePhotoController(
         const val TAG = "SwiftPicLive"
     }
 
+    /** Follow the still image's pinch / pan while the video is playing. */
+    fun setZoomTransform(m: Matrix) {
+        if (zoom == null) zoom = Matrix()
+        zoom?.set(m)
+        applyTransform()
+    }
+
     private fun applyTransform() {
         if (videoWidth <= 0 || videoHeight <= 0) return
         val viewWidth = textureView.width.toFloat()
         val viewHeight = textureView.height.toFloat()
         if (viewWidth <= 0f || viewHeight <= 0f) return
-        val scale = min(viewWidth / videoWidth, viewHeight / videoHeight)
-        val dx = (viewWidth - videoWidth * scale) / 2f
-        val dy = (viewHeight - videoHeight * scale) / 2f
+        // TextureView already stretches the video frame to fill the whole view.
+        // The transform must be a *relative* correction of that stretch: an
+        // absolute pixel scale leaves the picture distorted (just smaller).
+        val stretchX = viewWidth / videoWidth
+        val stretchY = viewHeight / videoHeight
+        val fit = min(stretchX, stretchY)
         val matrix = Matrix()
-        matrix.setScale(scale, scale)
-        matrix.postTranslate(dx, dy)
+        matrix.setScale(
+            fit / stretchX,
+            fit / stretchY,
+            viewWidth / 2f,
+            viewHeight / 2f
+        )
+        // The overlay is laid out at fit size, so the relative zoom can be
+        // concatenated directly: first fix the aspect, then zoom/pan with the still.
+        zoom?.let { matrix.postConcat(it) }
         textureView.setTransform(matrix)
     }
 

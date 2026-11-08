@@ -7,8 +7,10 @@ import android.graphics.BitmapRegionDecoder
 import android.graphics.Rect
 import android.net.Uri
 import android.util.Log
+import androidx.exifinterface.media.ExifInterface
 import java.io.Closeable
 import java.io.InputStream
+import kotlin.math.abs
 import kotlin.math.sqrt
 
 /**
@@ -114,6 +116,19 @@ class ImageRegionDecoder private constructor(
         const val TAG = "SwiftPicRegion"
         const val MAX_TILE_PIXELS = 4_000_000L
 
+        private fun hasExifRotation(context: Context, uri: Uri): Boolean = try {
+            val orientation = context.contentResolver.openInputStream(uri)?.use { input ->
+                ExifInterface(input).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_UNDEFINED
+                )
+            } ?: ExifInterface.ORIENTATION_UNDEFINED
+            orientation != ExifInterface.ORIENTATION_UNDEFINED &&
+                orientation != ExifInterface.ORIENTATION_NORMAL
+        } catch (e: Exception) {
+            false
+        }
+
         fun create(
             context: Context,
             uri: Uri,
@@ -121,6 +136,10 @@ class ImageRegionDecoder private constructor(
             displayHeight: Int
         ): ImageRegionDecoder? {
             return try {
+                // ImageDecoder rotates the base bitmap per EXIF, but
+                // BitmapRegionDecoder works in raw file coordinates. Overlaying
+                // a tile on such a photo shows the region upside-down / rotated.
+                if (hasExifRotation(context, uri)) return null
                 val afd = context.contentResolver.openAssetFileDescriptor(uri, "r")
                     ?: return null
                 val input = afd.createInputStream() ?: run {
@@ -140,6 +159,21 @@ class ImageRegionDecoder private constructor(
                     input.close()
                     afd.close()
                     return null
+                }
+                // Fallback for rotated sources without a readable EXIF tag:
+                // swapped aspect ratios cannot be mapped by a simple scale.
+                if (displayWidth > 0 && displayHeight > 0) {
+                    val srcAspect = decoder.width.toDouble() / decoder.height
+                    val displayAspect = displayWidth.toDouble() / displayHeight
+                    if (abs(srcAspect - displayAspect) > 0.05 &&
+                        abs(srcAspect * displayAspect - 1.0) < 0.05
+                    ) {
+                        @Suppress("DEPRECATION")
+                        decoder.recycle()
+                        input.close()
+                        afd.close()
+                        return null
+                    }
                 }
                 ImageRegionDecoder(
                     decoder, input, afd,

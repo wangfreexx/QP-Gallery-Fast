@@ -105,14 +105,20 @@ class ZoomImageView @JvmOverloads constructor(
     var onLongPressEnd: (() -> Unit)? = null
     var onEdgePage: ((Int) -> Unit)? = null
     var onZoomChanged: ((Float) -> Unit)? = null
+    /** Reports the transform from the fitted state, for layers drawn on top (live video). */
+    var onRelativeTransform: ((Matrix) -> Unit)? = null
     /** Requests a high-resolution tile for the visible source rectangle. */
     var onVisibleRegionChanged: ((Rect, Int, Int) -> Unit)? = null
 
+    private val relativeMatrix = Matrix()
+
     private var regionTile: Bitmap? = null
     private var regionRect: Rect? = null
+    private var regionTileScale = 0f
     private val regionRequest = Runnable { requestVisibleRegion() }
-    /** While the user is touching / flinging / animating, only the continuous base bitmap is drawn. */
+    /** While touching / flinging / animating; used to trigger one final refresh. */
     private var interacting = false
+    private var lastRegionRequestAt = 0L
     private val interactionEnd = object : Runnable {
         override fun run() {
             if (!flingScroller.isFinished) {
@@ -273,7 +279,24 @@ class ZoomImageView @JvmOverloads constructor(
             lastNotifiedRatio = ratio
             onZoomChanged?.invoke(ratio)
         }
+        notifyRelativeTransform()
         scheduleRegionUpdate()
+    }
+
+    /** Push the current transform to overlay layers (e.g. a playing live video). */
+    fun emitRelativeTransform() = notifyRelativeTransform()
+
+    private fun notifyRelativeTransform() {
+        val callback = onRelativeTransform ?: return
+        if (baseScale <= 0f || width <= 0 || height <= 0) return
+        val fitTx = (width - imageWidth * baseScale) / 2f
+        val fitTy = (height - imageHeight * baseScale) / 2f
+        // R = M * M0^-1, where M0 is the fitted transform. Overlay layers are
+        // already laid out at fit size, so applying R makes them zoom with us.
+        val s = scale / baseScale
+        relativeMatrix.setScale(s, s)
+        relativeMatrix.postTranslate(tx - s * fitTx, ty - s * fitTy)
+        callback(relativeMatrix)
     }
 
     /**
@@ -284,31 +307,48 @@ class ZoomImageView @JvmOverloads constructor(
         val previous = regionTile
         regionTile = bitmap
         regionRect = if (bitmap != null) rect else null
+        regionTileScale = if (bitmap != null) scale else 0f
         CacheStats.swapRegionTile(previous, bitmap)
         if (previous !== bitmap) previous?.recycle()
         if (bitmap == null && previous != null) Log.d(TAG, "region tile cleared")
         invalidate()
     }
 
-    /** Debounced: pinch and pan events otherwise fire dozens of decodes per second. */
+    /** Throttle (not debounce): continuous panning must keep refreshing tiles. */
     private fun scheduleRegionUpdate() {
         if (onVisibleRegionChanged == null) return
-        removeCallbacks(regionRequest)
         val ratio = if (baseScale > 0f) scale / baseScale else 1f
         if (ratio <= REGION_THRESHOLD) {
             // Dropping the stale tile avoids a sharp/blurry patch lingering
             // while the user zooms back out.
             if (regionTile != null) setRegionTile(null, null)
+            lastRegionRequestAt = 0L
+            removeCallbacks(regionRequest)
             return
         }
-        // No tile churn while a finger is down: panning would otherwise keep
-        // moving the viewport out of the tile and cause visible seams / flicker.
-        if (interacting) return
-        postDelayed(regionRequest, REGION_DEBOUNCE_MS)
+        val now = SystemClock.uptimeMillis()
+        val elapsed = now - lastRegionRequestAt
+        removeCallbacks(regionRequest)
+        if (elapsed >= REGION_THROTTLE_MS) {
+            lastRegionRequestAt = now
+            post(regionRequest)
+        } else {
+            postDelayed(regionRequest, REGION_THROTTLE_MS - elapsed)
+        }
     }
 
     private fun requestVisibleRegion() {
         val visible = visibleSourceRect() ?: return
+        // Avoid decoding the same area repeatedly on small pans. A meaningful
+        // zoom change still needs a fresh (sharper) sample.
+        val current = regionRect
+        val tileScale = regionTileScale
+        if (current != null && regionTile != null && tileScale > 0f &&
+            abs(scale - tileScale) / tileScale < 0.15f &&
+            current.contains(visible.left, visible.top, visible.right, visible.bottom)
+        ) {
+            return
+        }
         // Overscan a little so short pans do not immediately expose the low-res base.
         val padX = visible.width() * REGION_PADDING
         val padY = visible.height() * REGION_PADDING
@@ -370,13 +410,14 @@ class ZoomImageView @JvmOverloads constructor(
         val rect = regionRect
         val zoomRatio = if (baseScale > 0f) scale / baseScale else 1f
         val visible = visibleSourceRect()
-        // A tile only covers the region that was visible when it was requested.
-        // If the viewport grew (zooming out) or moved away (panning), drawing it
-        // would leave a sharp/blurry seam and look like an incomplete load.
-        val fullyCovers = visible != null && rect != null &&
-            rect.contains(visible.left, visible.top, visible.right, visible.bottom)
+        // Keep the tile visible as long as it overlaps the viewport. Hiding it
+        // on every gesture made zoomed-in pages blurry until the finger stopped;
+        // a partially covered viewport is fine because coordinates now match
+        // the base bitmap, so the uncovered strip simply shows the base layer.
+        val overlaps = visible != null && rect != null &&
+            rect.intersects(visible.left, visible.top, visible.right, visible.bottom)
         if (tile != null && !tile.isRecycled && rect != null &&
-            zoomRatio > REGION_THRESHOLD && !interacting && fullyCovers
+            zoomRatio > REGION_THRESHOLD && overlaps
         ) {
             val dst = RectF(
                 tx + rect.left * scale,
@@ -630,6 +671,24 @@ class ZoomImageView @JvmOverloads constructor(
 
     fun isAtFit(): Boolean = abs(scale - baseScale) < 0.01f
 
+    /** Leaving a page: drop the zoom and free the (up to 16 MB) region tile. */
+    fun resetZoom() {
+        if (imageWidth <= 0 || imageHeight <= 0 || baseScale <= 0f) return
+        animator?.cancel()
+        animator = null
+        cancelFling()
+        removeCallbacks(regionRequest)
+        removeCallbacks(interactionEnd)
+        interacting = false
+        lastRegionRequestAt = 0L
+        setRegionTile(null, null)
+        scale = baseScale
+        tx = (width - imageWidth * scale) / 2f
+        ty = (height - imageHeight * scale) / 2f
+        applyTransform()
+        invalidate()
+    }
+
     override fun performClick(): Boolean {
         super.performClick()
         return true
@@ -731,8 +790,8 @@ class ZoomImageView @JvmOverloads constructor(
         const val HORIZONTAL_DOMINANCE = 1.5f
         const val PAN_GAIN = 1.4f
         const val REGION_THRESHOLD = 1.4f
-        const val REGION_DEBOUNCE_MS = 90L
+        const val REGION_THROTTLE_MS = 120L
         const val REGION_SETTLE_MS = 120L
-        const val REGION_PADDING = 0.35f
+        const val REGION_PADDING = 0.6f
     }
 }
